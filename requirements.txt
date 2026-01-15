@@ -1,0 +1,6 @@
+pandas
+lightgbm
+requests
+google-generativeai
+beautifulsoup4
+lxml
