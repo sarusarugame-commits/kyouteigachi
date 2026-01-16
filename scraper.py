@@ -1,3 +1,4 @@
+# Updated at: 2026-01-16 19:42:37
 import requests
 from bs4 import BeautifulSoup
 import time
@@ -7,8 +8,8 @@ import random
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 
-# ★バージョン確認用署名★
-print("🛠️ LOADED: Scraper Version strict_debug_v2 (Japanese Error Mode)")
+# ★バージョン署名★
+print("🛠️ LOADED: Scraper Version 2026-01-16 19:42:37")
 
 # 設定
 MAX_RETRIES = 3
@@ -63,10 +64,9 @@ def extract_payout(soup, key_text):
     return 0
 
 def scrape_race_data(session, jcd, rno, date_str):
-    """デバッグモード: エラーがあれば即座に例外を発生させる"""
+    """日本語エラーデバッグモード"""
     base_url = "https://www.boatrace.jp/owpc/pc/race"
     
-    # ページ取得
     soup_before = get_soup(session, f"{base_url}/beforeinfo?rno={rno}&jcd={jcd:02d}&hd={date_str}")
     if not soup_before: raise FileNotFoundError(f"【エラー】直前情報ページなし: {jcd}場 {rno}R")
 
@@ -77,29 +77,24 @@ def scrape_race_data(session, jcd, rno, date_str):
 
     row = {'date': date_str, 'jcd': jcd, 'rno': rno}
 
-    # ① 風速
     wind_elem = soup_before.select_one(".weather1_bodyUnitLabelData")
-    if wind_elem is None: raise ValueError(f"【エラー】風速データなし (weather1_bodyUnitLabelData)")
+    if wind_elem is None: raise ValueError(f"【エラー】風速データなし")
     row['wind'] = float(clean_text(wind_elem.text).replace("m", "").strip())
 
-    # ② 各艇データ
     for i in range(1, 7):
-        # 展示
         boat_cell = soup_before.select_one(f".is-boatColor{i}")
-        if boat_cell is None: raise ValueError(f"【エラー】{i}号艇の展示行なし (.is-boatColor{i})")
+        if boat_cell is None: raise ValueError(f"【エラー】{i}号艇の展示行なし")
         tds = boat_cell.find_parent("tbody").select("td")
-        if len(tds) <= 4: raise IndexError(f"【エラー】{i}号艇の展示列不足 len={len(tds)}")
+        if len(tds) <= 4: raise IndexError(f"【エラー】{i}号艇の展示列不足")
         ex_val = clean_text(tds[4].text)
         if not ex_val: raise ValueError(f"【エラー】{i}号艇の展示タイム空")
         row[f'ex{i}'] = float(ex_val)
 
-        # 番組表
         list_elem = soup_list.select_one(f".is-boatColor{i}")
         if list_elem is None: raise ValueError(f"【エラー】{i}号艇の番組行なし")
         list_tbody = list_elem.find_parent("tbody")
         tds_list = list_tbody.select("td")
         
-        # 勝率
         wr_match = re.search(r"(\d\.\d{2})", clean_text(tds_list[3].text))
         if not wr_match: raise ValueError(f"【エラー】{i}号艇の勝率なし")
         row[f'wr{i}'] = float(wr_match.group(1))
@@ -119,7 +114,6 @@ def scrape_race_data(session, jcd, rno, date_str):
         if not mo_match: raise ValueError(f"【エラー】{i}号艇のモーターなし")
         row[f'mo{i}'] = float(mo_match.group(1))
 
-    # ③ オッズ（予測時は0でOK）
     if soup_res:
         row['tansho'] = extract_payout(soup_res, "単勝")
         row['nirentan'] = extract_payout(soup_res, "2連単")
