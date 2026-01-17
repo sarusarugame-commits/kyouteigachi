@@ -7,7 +7,7 @@ import numpy as np
 import lightgbm as lgb
 import google.generativeai as genai
 import zipfile
-import requests  # ← これが抜けていたので修正しました
+import requests
 from discordwebhook import Discord
 
 # スクレイピング機能の読み込み
@@ -16,7 +16,7 @@ from scraper import scrape_race_data, scrape_result
 # ==========================================
 # ⚙️ 設定エリア
 # ==========================================
-BET_AMOUNT = 1000  # 的中計算用の仮想投資額
+BET_AMOUNT = 1000
 genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
 model_gemini = genai.GenerativeModel('gemini-1.5-flash')
 discord = Discord(url=os.environ["DISCORD_WEBHOOK_URL"])
@@ -78,28 +78,46 @@ def main():
 
     # --- 2. 結果の確認・収支計算 ---
     print("📊 結果を確認中...")
+    
+    # 修正ポイント: ループ中にリストを変更しないようコピーで回すか、慎重に処理
     for item in status["notified"]:
         if item.get("checked"): continue
         
-        # 過去3日以内のレースだけ確認（それより前は諦める）
-        res = scrape_result(session, item["jcd"], item["rno"], item["date"])
-        if res:
-            is_win = (res["combo"] == item["combo"])
-            payout = res["payout"] if is_win else 0
-            profit = payout - BET_AMOUNT
-            status["total_balance"] += profit
-            item["checked"] = True
-            
-            place = PLACE_NAMES.get(item["jcd"], f"{item['jcd']}場")
-            result_msg = (
-                f"{'🎊 **的中！**' if is_win else '💀 不的中'}\n"
-                f"レース: {place} {item['rno']}R ({item['date']})\n"
-                f"予測: {item['combo']} → 結果: {res['combo']}\n"
-                f"収支: {'+' if profit > 0 else ''}{profit}円\n"
-                f"💰 現在の通算収支: {status['total_balance']}円"
-            )
-            discord.post(content=result_msg)
-            save_status(status)
+        # ★【重要修正】古いデータ(jcdキーがない)場合への対策
+        if "jcd" not in item:
+            try:
+                # ID (例: 20260116_01_03) から情報を復元する
+                parts = item["id"].split("_")
+                item["date"] = parts[0]
+                item["jcd"] = int(parts[1])
+                item["rno"] = int(parts[2])
+            except:
+                # 復元できない壊れたデータは無視して次へ
+                print(f"⚠️ スキップ: 不正なデータ形式 {item}")
+                continue
+
+        # 結果取得へ
+        try:
+            res = scrape_result(session, item["jcd"], item["rno"], item["date"])
+            if res:
+                is_win = (res["combo"] == item["combo"])
+                payout = res["payout"] if is_win else 0
+                profit = payout - BET_AMOUNT
+                status["total_balance"] += profit
+                item["checked"] = True
+                
+                place = PLACE_NAMES.get(item["jcd"], f"{item['jcd']}場")
+                result_msg = (
+                    f"{'🎊 **的中！**' if is_win else '💀 不的中'}\n"
+                    f"レース: {place} {item['rno']}R ({item['date']})\n"
+                    f"予測: {item['combo']} → 結果: {res['combo']}\n"
+                    f"収支: {'+' if profit > 0 else ''}{profit}円\n"
+                    f"💰 現在の通算収支: {status['total_balance']}円"
+                )
+                discord.post(content=result_msg)
+                save_status(status)
+        except Exception as e:
+            print(f"⚠️ 結果確認エラー {item['id']}: {e}")
 
     # --- 3. 新しいレースの予想 ---
     print("🔍 新しいレースをパトロール中...")
