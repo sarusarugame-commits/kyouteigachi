@@ -23,9 +23,8 @@ DB_FILE = "race_data.db"
 REPORT_HOURS = [13, 18, 23]
 
 # ★【厳選設定】自信度の足切りライン
-# ここを上げると通知が減り、下げると増えます
-THRESHOLD_NIRENTAN = 0.50  # 2連単の確率が50%以上なら通知
-THRESHOLD_TANSHO   = 0.75  # 1着の確率が75%以上なら通知
+THRESHOLD_NIRENTAN = 0.50  # 2連単 50%以上
+THRESHOLD_TANSHO   = 0.75  # 単勝 75%以上
 
 genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
 model_gemini = genai.GenerativeModel('gemini-1.5-flash')
@@ -198,7 +197,7 @@ def main():
     session = requests.Session()
     status = load_status()
 
-    # モデル読み込み
+    # モデル読み込み (★ここを修正しました)
     if not os.path.exists(MODEL_FILE):
         if os.path.exists(ZIP_MODEL):
             with zipfile.ZipFile(ZIP_MODEL, 'r') as f: f.extractall()
@@ -206,7 +205,9 @@ def main():
             with open(ZIP_MODEL, 'wb') as f_out:
                 for i in range(1, 10):
                     p = f'model_part_{i}'
-                    if os.path.exists(p): with open(p, 'rb') as f_in: f_out.write(f_in.read())
+                    if os.path.exists(p):
+                        with open(p, 'rb') as f_in:
+                            f_out.write(f_in.read())
             with zipfile.ZipFile(ZIP_MODEL, 'r') as f: f.extractall()
 
     try: bst = lgb.Booster(model_file=MODEL_FILE)
@@ -272,8 +273,7 @@ def main():
                     best_idx = np.argmax(probs)
                     combo, prob = COMBOS[best_idx], probs[best_idx]
 
-                    # ★ 厳選フィルター
-                    # 2連単が50%以上 OR 単勝が75%以上
+                    # 厳選フィルター
                     if prob >= THRESHOLD_NIRENTAN or win_probs[best_boat] >= THRESHOLD_TANSHO:
                         place = PLACE_NAMES.get(jcd, "会場")
                         try:
