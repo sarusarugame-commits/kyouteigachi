@@ -12,14 +12,14 @@ import subprocess
 import sqlite3
 from discordwebhook import Discord
 
-# スクレイピング機能の読み込み
+# スクレイピング機能
 from scraper import scrape_race_data, scrape_result
 
 # ==========================================
 # ⚙️ 設定エリア
 # ==========================================
 BET_AMOUNT = 1000
-DB_FILE = "race_data.db"  # データベースファイル名
+DB_FILE = "race_data.db"
 genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
 model_gemini = genai.GenerativeModel('gemini-1.5-flash')
 discord = Discord(url=os.environ["DISCORD_WEBHOOK_URL"])
@@ -35,14 +35,16 @@ PLACE_NAMES = {
 }
 REPORT_HOURS = [13, 18, 23]
 
+# ★ 日本時間(JST)の設定
+t_delta = datetime.timedelta(hours=9)
+JST = datetime.timezone(t_delta, 'JST')
+
 # ==========================================
-# 🗄️ データベース管理機能
+# 🗄️ データベース管理
 # ==========================================
 def init_db():
-    """データベースとテーブルの作成"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
-    # 履歴テーブル: レースIDを主キーにして重複を防ぐ
     c.execute('''CREATE TABLE IF NOT EXISTS history (
         race_id TEXT PRIMARY KEY,
         date TEXT,
@@ -62,12 +64,12 @@ def init_db():
     conn.close()
 
 def log_prediction_to_db(race_id, jcd, rno, date, combo, prob, comment):
-    """予想をDBに新規登録"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     try:
         place_name = PLACE_NAMES.get(jcd, "不明")
-        now_time = datetime.datetime.now().strftime('%H:%M:%S')
+        # JSTで時間を記録
+        now_time = datetime.datetime.now(JST).strftime('%H:%M:%S')
         c.execute('''INSERT OR IGNORE INTO history 
             (race_id, date, time, place, race_no, predict_combo, predict_prob, gemini_comment, status, result_combo, is_win, payout, profit)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
@@ -79,11 +81,9 @@ def log_prediction_to_db(race_id, jcd, rno, date, combo, prob, comment):
         conn.close()
 
 def update_result_to_db(race_id, result_combo, payout):
-    """結果をDBに更新"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     try:
-        # まず予想データを取得して的中判定
         c.execute("SELECT predict_combo FROM history WHERE race_id=?", (race_id,))
         row = c.fetchone()
         if row:
@@ -97,15 +97,14 @@ def update_result_to_db(race_id, result_combo, payout):
                 (result_combo, is_win, payout, profit, "FINISHED", race_id))
             conn.commit()
             return is_win, profit
-    except Exception as e:
-        print(f"⚠️ DB更新エラー: {e}")
+    except: pass
     finally:
         conn.close()
     return False, 0
 
 def get_today_summary_from_db():
-    """DBから今日の成績を集計"""
-    today = datetime.datetime.now().strftime('%Y%m%d')
+    # JSTの日付で集計
+    today = datetime.datetime.now(JST).strftime('%Y%m%d')
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT count(*), sum(is_win), sum(profit) FROM history WHERE date=? AND status='FINISHED'", (today,))
@@ -114,7 +113,6 @@ def get_today_summary_from_db():
     return total or 0, wins or 0, profit or 0
 
 def get_total_balance_from_db():
-    """DBから通算収支を計算"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT sum(profit) FROM history WHERE status='FINISHED'")
@@ -136,16 +134,13 @@ def save_status(status):
         json.dump(status, f, indent=4)
 
 def push_data_to_github():
-    """DBファイルとJSONの両方を保存"""
     try:
         subprocess.run('git config --global user.name "github-actions[bot]"', shell=True)
         subprocess.run('git config --global user.email "github-actions[bot]@users.noreply.github.com"', shell=True)
-        # DBファイルも追加
         subprocess.run(f'git add status.json {DB_FILE}', shell=True)
         subprocess.run('git pull origin main --rebase', shell=True)
         subprocess.run('git commit -m "Update DB & Status"', shell=True)
         subprocess.run('git push origin main', shell=True)
-        print("💾 DBと設定をGitHubに保存しました")
     except: pass
 
 def engineer_features(df):
@@ -167,7 +162,6 @@ def calculate_tansho_probs(probs):
     return win_probs
 
 def send_daily_report(current_hour):
-    """DBを使って正確なレポートを送信"""
     total, wins, today_profit = get_today_summary_from_db()
     total_balance = get_total_balance_from_db()
     
@@ -177,7 +171,7 @@ def send_daily_report(current_hour):
     emoji = "🌞" if current_hour == 13 else ("🌇" if current_hour == 18 else "🌙")
     
     msg = (
-        f"{emoji} **{current_hour}時の収支報告 (DB集計)**\n"
+        f"{emoji} **{current_hour}時の収支報告**\n"
         f"━━━━━━━━━━━━━━\n"
         f"📅 本日戦績: {wins}勝 {total - wins}敗\n"
         f"🎯 的中率: {win_rate:.1f}%\n"
@@ -189,16 +183,21 @@ def send_daily_report(current_hour):
 
 def main():
     start_time = time.time()
-    print("🚀 Bot起動: DB記録モード")
-    
-    # DB初期化
-    init_db()
-    
-    session = requests.Session()
-    status = load_status()
-    now = datetime.datetime.now()
+    # ★JST時刻を取得
+    now = datetime.datetime.now(JST)
     today = now.strftime('%Y%m%d')
     current_hour = now.hour
+    
+    print(f"🚀 Bot起動: JST {now.strftime('%H:%M')}")
+    
+    # 23:15を過ぎていたら、夜遅いので何もせず終了させる（0時以降通知防止）
+    if current_hour == 23 and now.minute > 15:
+        print("💤 23:15を過ぎているため、本日の業務は終了します。")
+        return
+
+    init_db()
+    session = requests.Session()
+    status = load_status()
 
     # モデル準備
     if not os.path.exists(MODEL_FILE):
@@ -216,13 +215,11 @@ def main():
         bst = lgb.Booster(model_file=MODEL_FILE)
     except: return
 
-    # --- 1. 結果確認 (JSONリストをもとにDB更新) ---
+    # --- 1. 結果確認 ---
     print("📊 結果確認中...")
     updated = False
     for item in status["notified"]:
         if item.get("checked"): continue
-        
-        # データ補正
         if "jcd" not in item:
             try:
                 parts = item["id"].split("_")
@@ -231,14 +228,9 @@ def main():
 
         res = scrape_result(session, item["jcd"], item["rno"], item["date"])
         if res:
-            # DBを更新して正確な収支を計算
             is_win, profit = update_result_to_db(item["id"], res["combo"], res["payout"])
-            
-            # JSON側も更新（ループ制御用）
             item["checked"] = True
             updated = True
-            
-            # 通算収支はDBから取得して表示
             total_balance = get_total_balance_from_db()
             place = PLACE_NAMES.get(item["jcd"], "会場")
             
@@ -256,7 +248,7 @@ def main():
         save_status(status)
         push_data_to_github()
 
-    # --- 3. 新規予想 ---
+    # --- 3. 新規予想 (22時以降は停止) ---
     if current_hour < 22:
         print("🔍 パトロール中...")
         for jcd in range(1, 25):
@@ -289,18 +281,13 @@ def main():
                             res_gemini = model_gemini.generate_content(prompt).text
                         except: res_gemini = "Gemini応答なし"
 
-                        # 通知
                         msg = (f"🚀 **勝負レース!** {place}{rno}R\n"
                                f"🛶 単勝:{best_boat}艇({win_probs[best_boat]:.0%})\n"
                                f"🔥 二連単:{combo}({prob:.0%})\n"
                                f"🤖 {res_gemini}\n"
                                f"[出走表](https://www.boatrace.jp/owpc/pc/race/racelist?rno={rno}&jcd={jcd:02d}&hd={today})")
                         discord.post(content=msg)
-                        
-                        # ★DBに保存
                         log_prediction_to_db(race_id, jcd, rno, today, combo, prob, res_gemini)
-                        
-                        # JSONにも保存（重複防止用）
                         status["notified"].append({"id": race_id, "jcd": jcd, "rno": rno, "date": today, "combo": combo, "checked": False})
                         venue_updated = True
                 except: continue
