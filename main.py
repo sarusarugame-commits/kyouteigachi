@@ -5,7 +5,6 @@ import time
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
-# import google.generativeai as genai  ←削除（ライブラリ不要）
 import zipfile
 import requests
 import subprocess
@@ -22,8 +21,11 @@ DB_FILE = "race_data.db"
 REPORT_HOURS = [13, 18, 23]
 
 # ★【厳選設定】
-THRESHOLD_NIRENTAN = 0.50  # 2連単 50%以上
-THRESHOLD_TANSHO   = 0.75  # 単勝 75%以上
+THRESHOLD_NIRENTAN = 0.50
+THRESHOLD_TANSHO   = 0.75
+
+# ★【Geminiモデル設定】指定のモデルに変更
+GEMINI_MODEL_NAME = "gemini-3-flash-preview"
 
 MODEL_FILE = 'boat_model_nirentan.txt'
 ZIP_MODEL = 'model.zip'
@@ -40,14 +42,13 @@ t_delta = datetime.timedelta(hours=9)
 JST = datetime.timezone(t_delta, 'JST')
 
 # ==========================================
-# 🤖 Gemini API 直接呼び出し関数
+# 🤖 Gemini API 直接呼び出し
 # ==========================================
 def call_gemini_api(prompt):
     api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        return "APIキー未設定"
+    if not api_key: return "APIキー未設定"
     
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={api_key}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL_NAME}:generateContent?key={api_key}"
     headers = {'Content-Type': 'application/json'}
     data = {
         "contents": [{
@@ -60,7 +61,7 @@ def call_gemini_api(prompt):
         if response.status_code == 200:
             return response.json()['candidates'][0]['content']['parts'][0]['text']
         else:
-            print(f"⚠️ Gemini API Error: {response.status_code} {response.text}")
+            print(f"⚠️ Gemini Error {response.status_code}: {response.text}")
             return f"Geminiエラー({response.status_code})"
     except Exception as e:
         print(f"⚠️ Gemini通信失敗: {e}")
@@ -303,7 +304,7 @@ def main():
                     if prob >= THRESHOLD_NIRENTAN or win_probs[best_boat] >= THRESHOLD_TANSHO:
                         place = PLACE_NAMES.get(jcd, "会場")
                         
-                        # ★ここでAPIを直接叩く
+                        # Gemini呼び出し
                         prompt = f"{place}{rno}R。単勝{best_boat}({win_probs[best_boat]:.0%})、二連単{combo}({prob:.0%})。推奨理由を一言。"
                         res_gemini = call_gemini_api(prompt)
 
