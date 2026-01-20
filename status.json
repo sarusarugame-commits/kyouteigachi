@@ -382,6 +382,38 @@
             "date": "20260120",
             "combo": "1-3",
             "checked": false
+        },
+        {
+            "id": "20260120_02_9",
+            "jcd": 2,
+            "rno": 9,
+            "date": "20260120",
+            "combo": "1-3",
+            "checked": false
+        },
+        {
+            "id": "20260120_08_9",
+            "jcd": 8,
+            "rno": 9,
+            "date": "20260120",
+            "combo": "1-3",
+            "checked": false
+        },
+        {
+            "id": "20260120_13_9",
+            "jcd": 13,
+            "rno": 9,
+            "date": "20260120",
+            "combo": "1-4",
+            "checked": false
+        },
+        {
+            "id": "20260120_18_9",
+            "jcd": 18,
+            "rno": 9,
+            "date": "20260120",
+            "combo": "1-3",
+            "checked": false
         }
     ],
     "results": [],
