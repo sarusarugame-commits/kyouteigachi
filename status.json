@@ -270,6 +270,30 @@
             "date": "20260120",
             "combo": "1-3",
             "checked": false
+        },
+        {
+            "id": "20260120_06_8",
+            "jcd": 6,
+            "rno": 8,
+            "date": "20260120",
+            "combo": "1-3",
+            "checked": false
+        },
+        {
+            "id": "20260120_08_8",
+            "jcd": 8,
+            "rno": 8,
+            "date": "20260120",
+            "combo": "2-3",
+            "checked": false
+        },
+        {
+            "id": "20260120_20_8",
+            "jcd": 20,
+            "rno": 8,
+            "date": "20260120",
+            "combo": "1-3",
+            "checked": false
         }
     ],
     "results": [],
