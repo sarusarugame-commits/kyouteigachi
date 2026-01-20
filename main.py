@@ -21,14 +21,14 @@ BET_AMOUNT = 1000
 DB_FILE = "race_data.db"
 REPORT_HOURS = [13, 18, 23]
 
-# ★【厳選設定】自信度の足切りライン
-THRESHOLD_NIRENTAN = 0.40  # 40%以上 (緩和中)
-THRESHOLD_TANSHO   = 0.50  # 50%以上 (緩和中)
+# ★【厳選設定】とりあえず緩めで様子見
+THRESHOLD_NIRENTAN = 0.40
+THRESHOLD_TANSHO   = 0.50
 
 genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
 model_gemini = genai.GenerativeModel('gemini-1.5-flash')
 
-# Discord送信関数
+# Discord送信
 def send_discord(content):
     url = os.environ.get("DISCORD_WEBHOOK_URL")
     if not url: return
@@ -46,7 +46,7 @@ PLACE_NAMES = {
     19: "下関", 20: "若松", 21: "芦屋", 22: "福岡", 23: "唐津", 24: "大村"
 }
 
-# 日本時間(JST)設定
+# 日本時間設定
 t_delta = datetime.timedelta(hours=9)
 JST = datetime.timezone(t_delta, 'JST')
 
@@ -133,25 +133,17 @@ def load_status():
 def save_status(status):
     with open('status.json', 'w') as f: json.dump(status, f, indent=4)
 
-# ★★★ 修正したGit保存関数 ★★★
 def push_data_to_github():
     try:
-        # 1. ユーザー設定
         subprocess.run('git config --global user.name "github-actions[bot]"', shell=True)
         subprocess.run('git config --global user.email "github-actions[bot]@users.noreply.github.com"', shell=True)
-        
-        # 2. 追加してコミット (ここを先にやることで競合を防ぐ)
         subprocess.run(f'git add status.json {DB_FILE}', shell=True)
         subprocess.run('git commit -m "Update Data from Bot"', shell=True)
-        
-        # 3. リモートの最新を取り込んで(rebase)、自分の変更をその上に乗せる
         subprocess.run('git pull origin main --rebase', shell=True)
-        
-        # 4. 送信
         subprocess.run('git push origin main', shell=True)
-        print("💾 GitHubへデータを保存しました")
+        print("💾 データ保存完了")
     except Exception as e:
-        print(f"⚠️ 保存エラー（致命的ではありません）: {e}")
+        print(f"⚠️ 保存失敗: {e}")
 
 def engineer_features(df):
     for i in range(1, 7):
@@ -172,10 +164,15 @@ def calculate_tansho_probs(probs):
     return win_probs
 
 def check_deadline(deadline_str, now_dt):
+    """締切時刻チェック（時刻取得失敗時は 23:59 とみなして許可）"""
     try:
-        if not deadline_str: return False
+        if not deadline_str: return True # 時刻不明なら許可
+        if deadline_str == "23:59": return True
+        
         hm = deadline_str.split(":")
         deadline_dt = now_dt.replace(hour=int(hm[0]), minute=int(hm[1]), second=0, microsecond=0)
+        
+        # 締切5分前を切っていたらスキップ
         limit = deadline_dt - datetime.timedelta(minutes=5)
         return now_dt < limit
     except: return True
@@ -208,8 +205,7 @@ def main():
     current_hour = now.hour
     
     print(f"🚀 Bot起動: {now.strftime('%H:%M')}")
-    # 起動通知（うるさかったらコメントアウト）
-    send_discord(f"🚀 Bot起動しました ({now.strftime('%H:%M')})")
+    # ★起動通知は削除しました
     
     init_db()
     session = requests.Session()
@@ -237,9 +233,11 @@ def main():
         save_status(status)
         push_data_to_github()
 
-    # --- 2. 定期報告 ---
+    # --- 2. 定期報告 (重複防止強化版) ---
     report_key = f"{today}_{current_hour}"
-    if current_hour in REPORT_HOURS and status.get("last_report") != report_key:
+    # ★追加: 「現在時刻の分が 30未満」のときだけ報告する。
+    # これにより、X時30分の実行回では絶対に報告が送られなくなる。
+    if now.minute < 30 and current_hour in REPORT_HOURS and status.get("last_report") != report_key:
         print(f"📢 {current_hour}時の報告を送信します")
         send_daily_report(current_hour)
         status["last_report"] = report_key
