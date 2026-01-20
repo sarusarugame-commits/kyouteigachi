@@ -10,7 +10,6 @@ import zipfile
 import requests
 import subprocess
 import sqlite3
-# from discordwebhook import Discord # ←削除（requestsで直接送ります）
 
 # スクレイピング機能
 from scraper import scrape_race_data, scrape_result
@@ -22,14 +21,14 @@ BET_AMOUNT = 1000
 DB_FILE = "race_data.db"
 REPORT_HOURS = [13, 18, 23]
 
-# ★【緩和設定】とりあえず通知が来るか確認するため下げます
-THRESHOLD_NIRENTAN = 0.40  # 40%以上なら通知
-THRESHOLD_TANSHO   = 0.50  # 50%以上なら通知
+# ★【厳選設定】自信度の足切りライン
+THRESHOLD_NIRENTAN = 0.40  # 40%以上 (緩和中)
+THRESHOLD_TANSHO   = 0.50  # 50%以上 (緩和中)
 
 genai.configure(api_key=os.environ.get("GEMINI_API_KEY"))
 model_gemini = genai.GenerativeModel('gemini-1.5-flash')
 
-# ★ Discord送信関数 (ライブラリを使わず直接叩く)
+# Discord送信関数
 def send_discord(content):
     url = os.environ.get("DISCORD_WEBHOOK_URL")
     if not url: return
@@ -47,7 +46,7 @@ PLACE_NAMES = {
     19: "下関", 20: "若松", 21: "芦屋", 22: "福岡", 23: "唐津", 24: "大村"
 }
 
-# ★ 日本時間(JST)設定
+# 日本時間(JST)設定
 t_delta = datetime.timedelta(hours=9)
 JST = datetime.timezone(t_delta, 'JST')
 
@@ -134,15 +133,25 @@ def load_status():
 def save_status(status):
     with open('status.json', 'w') as f: json.dump(status, f, indent=4)
 
+# ★★★ 修正したGit保存関数 ★★★
 def push_data_to_github():
     try:
+        # 1. ユーザー設定
         subprocess.run('git config --global user.name "github-actions[bot]"', shell=True)
         subprocess.run('git config --global user.email "github-actions[bot]@users.noreply.github.com"', shell=True)
+        
+        # 2. 追加してコミット (ここを先にやることで競合を防ぐ)
         subprocess.run(f'git add status.json {DB_FILE}', shell=True)
+        subprocess.run('git commit -m "Update Data from Bot"', shell=True)
+        
+        # 3. リモートの最新を取り込んで(rebase)、自分の変更をその上に乗せる
         subprocess.run('git pull origin main --rebase', shell=True)
-        subprocess.run('git commit -m "Update Data"', shell=True)
+        
+        # 4. 送信
         subprocess.run('git push origin main', shell=True)
-    except: pass
+        print("💾 GitHubへデータを保存しました")
+    except Exception as e:
+        print(f"⚠️ 保存エラー（致命的ではありません）: {e}")
 
 def engineer_features(df):
     for i in range(1, 7):
@@ -199,8 +208,8 @@ def main():
     current_hour = now.hour
     
     print(f"🚀 Bot起動: {now.strftime('%H:%M')}")
-    # ★起動確認メッセージ（うるさい場合は後で消してください）
-    # send_discord(f"🚀 Botが起動しました ({now.strftime('%H:%M')})")
+    # 起動通知（うるさかったらコメントアウト）
+    send_discord(f"🚀 Bot起動しました ({now.strftime('%H:%M')})")
     
     init_db()
     session = requests.Session()
@@ -242,7 +251,7 @@ def main():
         print("💤 深夜のため終了")
         return
 
-    # モデル読み込み
+    # モデル準備
     if not os.path.exists(MODEL_FILE):
         if os.path.exists(ZIP_MODEL):
             with zipfile.ZipFile(ZIP_MODEL, 'r') as f: f.extractall()
@@ -286,7 +295,6 @@ def main():
                     best_idx = np.argmax(probs)
                     combo, prob = COMBOS[best_idx], probs[best_idx]
 
-                    # ★緩和されたフィルター
                     if prob >= THRESHOLD_NIRENTAN or win_probs[best_boat] >= THRESHOLD_TANSHO:
                         place = PLACE_NAMES.get(jcd, "会場")
                         try:
