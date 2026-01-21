@@ -686,6 +686,14 @@
             "date": "20260121",
             "combo": "1-5",
             "checked": false
+        },
+        {
+            "id": "20260121_14_7",
+            "jcd": 14,
+            "rno": 7,
+            "date": "20260121",
+            "combo": "1-3",
+            "checked": false
         }
     ],
     "results": [],
