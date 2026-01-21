@@ -9,7 +9,7 @@ import requests
 import subprocess
 import sqlite3
 import concurrent.futures
-import zipfile  # ★ここを追加しました
+import zipfile  # ★前回忘れていたライブラリを追加しました
 
 # スクレイピング機能
 from scraper import scrape_race_data, scrape_result
@@ -17,9 +17,9 @@ from scraper import scrape_race_data, scrape_result
 # ==========================================
 # ⚙️ 設定エリア
 # ==========================================
-BET_AMOUNT = 1000
+BET_AMOUNT = 1000  # 1レースあたりのシミュレーション購入額
 DB_FILE = "race_data.db"
-REPORT_HOURS = [13, 18, 23] # 23時は「本日の最終結果」
+REPORT_HOURS = [13, 18, 23]
 
 THRESHOLD_NIRENTAN = 0.50
 THRESHOLD_TANSHO   = 0.75
@@ -78,22 +78,27 @@ def save_and_notify(new_predictions, updated_results):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     try:
+        # 結果更新通知
         for res in updated_results:
             is_win = 1 if res['predict_combo'] == res['result_combo'] else 0
             profit = (res['payout'] - BET_AMOUNT) if is_win else -BET_AMOUNT
             c.execute("UPDATE history SET result_combo=?, is_win=?, payout=?, profit=?, status=? WHERE race_id=?",
                 (res['result_combo'], is_win, res['payout'], profit, "FINISHED", res['race_id']))
             place = PLACE_NAMES.get(res['jcd'], "会場")
+            
+            # 的中/不的中の通知
             send_discord(f"{'🎊 的中' if is_win else '💀 外れ'} {place}{res['rno']}R\n予測:{res['predict_combo']}→結果:{res['result_combo']}\n収支:{'+' if profit>0 else ''}{profit}円")
 
+        # 新規予想通知
         for pred in new_predictions:
             now_str = datetime.datetime.now(JST).strftime('%H:%M:%S')
             place = PLACE_NAMES.get(pred['jcd'], "不明")
+            # ステータス PENDING = 予想済み（結果待ち）
             c.execute("INSERT OR IGNORE INTO history VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (pred['id'], pred['date'], now_str, place, pred['rno'], pred['combo'], float(pred['prob']), pred['comment'], "PENDING", "", 0, 0, 0))
             
             t_disp = f"(締切 {pred['deadline']})" if pred['deadline'] else ""
-            msg = (f"🔥 **勝負レース!** {place}{pred['rno']}R {t_disp}\n"
+            msg = (f"🔥 **勝負レース予想** {place}{pred['rno']}R {t_disp}\n"
                    f"🛶 単勝:{pred['best_boat']}艇({pred['win_prob']:.0%})\n"
                    f"🎯 二連単:{pred['combo']}({pred['prob']:.0%})\n"
                    f"🤖 {pred['comment']}\n"
@@ -142,15 +147,16 @@ def process_venue(jcd, today, notified, bst):
     res_list, pred_list = [], []
     sess = requests.Session()
     
-    # 結果確認
-    for item in [i for i in notified if i['jcd'] == jcd and not i['checked']]:
+    # 1. 結果確認 (未確認のものがあれば)
+    pending_items = [i for i in notified if i['jcd'] == jcd and not i['checked']]
+    for item in pending_items:
         r = scrape_result(sess, item["jcd"], item["rno"], item["date"])
         if r:
             item['checked'] = True
             res_list.append({'race_id': item['id'], 'jcd': item['jcd'], 'rno': item['rno'], 
                              'predict_combo': item['combo'], 'result_combo': r['combo'], 'payout': r['payout']})
 
-    # 予想
+    # 2. 新規予想
     now = datetime.datetime.now(JST)
     for rno in range(1, 13):
         rid = f"{today}_{str(jcd).zfill(2)}_{rno}"
@@ -182,13 +188,12 @@ def process_venue(jcd, today, notified, bst):
 
 def main():
     start_time = time.time()
-    # 6時間稼働がMAX
-    MAX_RUNTIME = 6 * 3600
+    MAX_RUNTIME = 6 * 3600 # 6時間
     
     print("🚀 常駐Bot起動 (レース時間帯限定)")
     init_db()
     
-    # モデル解凍処理
+    # モデル解凍
     if not os.path.exists(MODEL_FILE):
         if os.path.exists(ZIP_MODEL):
             with zipfile.ZipFile(ZIP_MODEL, 'r') as f: f.extractall()
@@ -208,21 +213,20 @@ def main():
         now = datetime.datetime.now(JST)
         today = now.strftime('%Y%m%d')
         
-        # 【重要】22時を過ぎたら営業終了
+        # 22時終了
         if now.hour >= 22:
-            print("🌙 22時を過ぎたため、本日の業務を終了します。")
+            print("🌙 業務終了")
             break
 
-        # GitHub Actionsの制限(6時間)が近づいたら安全に終了
-        if time.time() - start_time > MAX_RUNTIME - 180: # 3分マージン
-            print("💤 稼働時間リミットにより再起動待機")
+        if time.time() - start_time > MAX_RUNTIME - 180:
+            print("💤 再起動待機")
             break
         
         if not os.path.exists('status.json'): status = {"notified": [], "last_report": ""}
         else:
             with open('status.json', 'r') as f: status = json.load(f)
 
-        print(f"⚡️ スキャン開始: {now.strftime('%H:%M')}")
+        print(f"⚡️ スキャン: {now.strftime('%H:%M')}")
         
         # 並列処理
         all_res, all_pred = [], []
@@ -248,17 +252,28 @@ def main():
                                        "date": p['date'], "combo": p['combo'], "checked": False})
             updated = True
         
-        # 定期報告
+        # 定期報告ロジック
         report_key = f"{today}_{now.hour}"
         if now.hour in REPORT_HOURS and status.get("last_report") != report_key:
             conn = sqlite3.connect(DB_FILE)
             c = conn.cursor()
+            
+            # 完了したレース
             c.execute("SELECT count(*), sum(is_win), sum(profit) FROM history WHERE date=? AND status='FINISHED'", (today,))
             cnt, wins, profit = c.fetchone()
+            
+            # 結果待ちのレース (PENDING)
+            c.execute("SELECT count(*) FROM history WHERE date=? AND status='PENDING'", (today,))
+            pending_cnt = c.fetchone()[0]
             conn.close()
-            # 23時(最終報告)以外でも戦績があれば報告、なければスルー
-            if cnt > 0 or now.hour == 23:
-                send_discord(f"**{now.hour}時の報告**\n戦績:{wins}勝\n収支:{'+' if (profit or 0)>0 else ''}{profit or 0}円")
+            
+            # 戦績、または待機中があれば報告する
+            if cnt > 0 or pending_cnt > 0 or now.hour == 23:
+                msg = (f"**{now.hour}時の報告**\n"
+                       f"✅ 完了:{cnt}R (勝:{wins})\n"
+                       f"⏳ 予想中(待機):{pending_cnt}R\n"
+                       f"💵 収支(シミュレーション):{'+' if (profit or 0)>0 else ''}{profit or 0}円")
+                send_discord(msg)
                 status["last_report"] = report_key
                 updated = True
 
@@ -266,7 +281,6 @@ def main():
             with open('status.json', 'w') as f: json.dump(status, f, indent=4)
             push_data()
 
-        # 10分待機
         elapsed = time.time() - cycle_start
         sleep_time = max(0, 600 - elapsed)
         print(f"⏳ 待機: {int(sleep_time)}秒")
