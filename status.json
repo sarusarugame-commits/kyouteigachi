@@ -934,6 +934,14 @@
             "date": "20260121",
             "combo": "1-4",
             "checked": false
+        },
+        {
+            "id": "20260122_10_1",
+            "jcd": 10,
+            "rno": 1,
+            "date": "20260122",
+            "combo": "1-4",
+            "checked": false
         }
     ],
     "results": [],
