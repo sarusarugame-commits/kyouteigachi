@@ -9,6 +9,7 @@ import requests
 import subprocess
 import sqlite3
 import concurrent.futures
+import zipfile  # ★ここを追加しました
 
 # スクレイピング機能
 from scraper import scrape_race_data, scrape_result
@@ -18,7 +19,7 @@ from scraper import scrape_race_data, scrape_result
 # ==========================================
 BET_AMOUNT = 1000
 DB_FILE = "race_data.db"
-REPORT_HOURS = [13, 18, 23] # 23時の報告は「本日の最終結果」として送信
+REPORT_HOURS = [13, 18, 23] # 23時は「本日の最終結果」
 
 THRESHOLD_NIRENTAN = 0.50
 THRESHOLD_TANSHO   = 0.75
@@ -187,6 +188,7 @@ def main():
     print("🚀 常駐Bot起動 (レース時間帯限定)")
     init_db()
     
+    # モデル解凍処理
     if not os.path.exists(MODEL_FILE):
         if os.path.exists(ZIP_MODEL):
             with zipfile.ZipFile(ZIP_MODEL, 'r') as f: f.extractall()
@@ -208,7 +210,7 @@ def main():
         
         # 【重要】22時を過ぎたら営業終了
         if now.hour >= 22:
-            print("🌙 22時を過ぎたため、本日の業務を終了します。お疲れ様でした。")
+            print("🌙 22時を過ぎたため、本日の業務を終了します。")
             break
 
         # GitHub Actionsの制限(6時間)が近づいたら安全に終了
@@ -254,13 +256,9 @@ def main():
             c.execute("SELECT count(*), sum(is_win), sum(profit) FROM history WHERE date=? AND status='FINISHED'", (today,))
             cnt, wins, profit = c.fetchone()
             conn.close()
-            win_rate = (wins/cnt*100) if cnt else 0
-            emoji = "🌞" if now.hour == 13 else ("🌇" if now.hour == 18 else "🌙")
-            
             # 23時(最終報告)以外でも戦績があれば報告、なければスルー
-            # ただし23時は必ず報告（もし20時起動のBotが23時に生きていれば）
             if cnt > 0 or now.hour == 23:
-                send_discord(f"{emoji} **{now.hour}時の報告**\n戦績:{wins}勝\n収支:{'+' if (profit or 0)>0 else ''}{profit or 0}円")
+                send_discord(f"**{now.hour}時の報告**\n戦績:{wins}勝\n収支:{'+' if (profit or 0)>0 else ''}{profit or 0}円")
                 status["last_report"] = report_key
                 updated = True
 
