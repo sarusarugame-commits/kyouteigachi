@@ -40,18 +40,15 @@ t_delta = datetime.timedelta(hours=9)
 JST = datetime.timezone(t_delta, 'JST')
 
 # ==========================================
-# 🤖 Groq API & Discord (デバッグ強化版)
+# 🤖 Groq API & Discord (修正版)
 # ==========================================
 def call_groq_api(prompt):
-    api_key = os.environ.get("GROQ_API_KEY")
+    # ★修正点: .strip() を追加して、改行や空白を自動削除する
+    api_key = os.environ.get("GROQ_API_KEY", "").strip()
     
-    # APIキーの状態確認ログ
     if not api_key:
-        print("❌ [Groq] APIキーが設定されていません (GROQ_API_KEY is missing)")
+        print("❌ [Groq] APIキーが設定されていません")
         return "APIキー未設定"
-    else:
-        # セキュリティのため先頭4文字だけ表示
-        print(f"🔑 [Groq] APIキー確認: {api_key[:4]}****")
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -64,43 +61,31 @@ def call_groq_api(prompt):
     }
     
     print(f"📤 [Groq] リクエスト送信中... (Model: {GROQ_MODEL_NAME})")
-    start_time = time.time()
     
     try:
-        # タイムアウトを30秒に延長
         res = requests.post(GROQ_API_URL, headers=headers, json=data, timeout=30)
-        elapsed = time.time() - start_time
         
-        print(f"⏱️ [Groq] 応答時間: {elapsed:.2f}秒, Status: {res.status_code}")
-
         if res.status_code == 200:
             content = res.json()['choices'][0]['message']['content']
             print("✅ [Groq] 応答受信成功")
             return content
         else:
             print(f"⚠️ [Groq] Error Status: {res.status_code}")
-            print(f"⚠️ [Groq] Error Body: {res.text}") # エラーの詳細を表示
+            print(f"⚠️ [Groq] Error Body: {res.text}")
             return f"エラー({res.status_code})"
             
     except requests.exceptions.Timeout:
-        print("⏰ [Groq] タイムアウト (30秒経過)")
+        print("⏰ [Groq] タイムアウト")
         return "タイムアウト"
     except Exception as e:
-        print(f"🔥 [Groq] 例外発生: {e}")
-        traceback.print_exc() # 詳細なエラースタックトレースを表示
+        print(f"🔥 [Groq] 通信エラー: {e}")
         return "応答なし"
 
 def send_discord(content):
     url = os.environ.get("DISCORD_WEBHOOK_URL")
-    if not url:
-        print("⚠️ Discord Webhook URL未設定")
-        return
-    try: 
-        res = requests.post(url, json={"content": content}, timeout=10)
-        if res.status_code not in [200, 204]:
-            print(f"❌ Discord送信失敗: {res.status_code} {res.text}")
-    except Exception as e:
-        print(f"❌ Discord送信エラー: {e}")
+    if not url: return
+    try: requests.post(url, json={"content": content}, timeout=10)
+    except: pass
 
 # ==========================================
 # 🗄️ DB & Logic
@@ -173,12 +158,11 @@ def process_prediction(jcd, today, notified_ids, bst):
 
             if prob >= THRESHOLD_NIRENTAN or win_p[best_b] >= THRESHOLD_TANSHO:
                 place = PLACE_NAMES.get(jcd, "会場")
-                print(f"🎯 候補発見: {place}{rno}R (Prob: {prob:.2f}) -> Groqへ問い合わせ中...")
+                print(f"🎯 候補発見: {place}{rno}R -> Groq問い合わせ中...")
                 
-                prompt = f"{place}{rno}R。単勝{best_b}({win_p[best_b]:.0%})、二連単{combo}({prob:.0%})。推奨理由を一言。"
-                
-                # 詳細ログ付きGroq呼び出し
-                comment = call_groq_api(prompt)
+                comment = call_groq_api(
+                    f"{place}{rno}R。単勝{best_b}({win_p[best_b]:.0%})、二連単{combo}({prob:.0%})。推奨理由を一言。"
+                )
                 
                 pred_list.append({
                     'id': rid, 'jcd': jcd, 'rno': rno, 'date': today, 
@@ -186,16 +170,13 @@ def process_prediction(jcd, today, notified_ids, bst):
                     'win_prob': win_p[best_b], 'comment': comment, 
                     'deadline': raw.get('deadline_time')
                 })
-        except Exception as e:
-            # print(f"Skip {jcd}-{rno}: {e}")
-            continue
+        except: continue
     return pred_list
 
 def main():
     print(f"🚀 [Main] 高速予想Bot起動 (Model: {GROQ_MODEL_NAME})")
     init_db()
     
-    # モデルファイルの準備
     if not os.path.exists(MODEL_FILE):
         if not os.path.exists(ZIP_MODEL):
             if os.path.exists('model_part_1') or os.path.exists('model_part_01'):
@@ -211,7 +192,6 @@ def main():
         if os.path.exists(ZIP_MODEL):
             print("📦 モデルを解凍中...")
             with zipfile.ZipFile(ZIP_MODEL, 'r') as f: f.extractall()
-            print("✅ 解凍完了")
     
     try: 
         bst = lgb.Booster(model_file=MODEL_FILE)
@@ -260,7 +240,7 @@ def main():
                        f"🤖 {pred['comment']}\n"
                        f"[出走表](https://www.boatrace.jp/owpc/pc/race/racelist?rno={pred['rno']}&jcd={pred['jcd']:02d}&hd={pred['date']})")
                 send_discord(msg)
-                print(f"✅ 通知送信: {place}{pred['rno']}R")
+                print(f"✅ 通知: {place}{pred['rno']}R")
             conn.commit()
             conn.close()
 
