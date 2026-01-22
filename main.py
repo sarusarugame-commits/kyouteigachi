@@ -10,19 +10,16 @@ import concurrent.futures
 import zipfile
 import traceback
 
-# スクレイピング機能
-from scraper import scrape_race_data
+# ★更新したscraperから scrape_odds をインポート
+from scraper import scrape_race_data, scrape_odds
 
 # ==========================================
 # ⚙️ 設定エリア
 # ==========================================
 DB_FILE = "race_data.db"
-
-# ★閾値設定
 THRESHOLD_NIRENTAN = 0.50
 THRESHOLD_TANSHO   = 0.75
 
-# ★Groq設定
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL_NAME = "meta-llama/llama-4-scout-17b-16e-instruct"
 
@@ -40,15 +37,11 @@ t_delta = datetime.timedelta(hours=9)
 JST = datetime.timezone(t_delta, 'JST')
 
 # ==========================================
-# 🤖 Groq API & Discord (修正版)
+# 🤖 Groq API
 # ==========================================
 def call_groq_api(prompt):
-    # ★修正点: .strip() を追加して、改行や空白を自動削除する
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
-    
-    if not api_key:
-        print("❌ [Groq] APIキーが設定されていません")
-        return "APIキー未設定"
+    if not api_key: return "APIキー未設定"
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -60,26 +53,14 @@ def call_groq_api(prompt):
         "temperature": 0.7
     }
     
-    print(f"📤 [Groq] リクエスト送信中... (Model: {GROQ_MODEL_NAME})")
-    
     try:
         res = requests.post(GROQ_API_URL, headers=headers, json=data, timeout=30)
-        
         if res.status_code == 200:
-            content = res.json()['choices'][0]['message']['content']
-            print("✅ [Groq] 応答受信成功")
-            return content
+            return res.json()['choices'][0]['message']['content']
         else:
-            print(f"⚠️ [Groq] Error Status: {res.status_code}")
-            print(f"⚠️ [Groq] Error Body: {res.text}")
+            print(f"⚠️ Groq Error: {res.status_code}")
             return f"エラー({res.status_code})"
-            
-    except requests.exceptions.Timeout:
-        print("⏰ [Groq] タイムアウト")
-        return "タイムアウト"
-    except Exception as e:
-        print(f"🔥 [Groq] 通信エラー: {e}")
-        return "応答なし"
+    except: return "応答なし"
 
 def send_discord(content):
     url = os.environ.get("DISCORD_WEBHOOK_URL")
@@ -121,12 +102,8 @@ def is_target_race(deadline_str, now_dt):
         if not deadline_str or deadline_str == "23:59": return True
         hm = deadline_str.split(":")
         d_dt = now_dt.replace(hour=int(hm[0]), minute=int(hm[1]), second=0)
-        
-        if d_dt < now_dt - datetime.timedelta(hours=1):
-             d_dt += datetime.timedelta(days=1)
-        
+        if d_dt < now_dt - datetime.timedelta(hours=1): d_dt += datetime.timedelta(days=1)
         if now_dt > d_dt: return False
-        
         return (d_dt - now_dt) <= datetime.timedelta(minutes=60)
     except: return True
 
@@ -140,11 +117,12 @@ def process_prediction(jcd, today, notified_ids, bst):
         if rid in notified_ids: continue
         
         try:
+            # 1. レース情報取得
             raw = scrape_race_data(sess, jcd, rno, today)
             if not raw: continue 
-            
             if not is_target_race(raw.get('deadline_time'), now): continue
             
+            # 2. モデル予測
             df = engineer_features(pd.DataFrame([raw]))
             cols = ['jcd', 'rno', 'wind', 'wr_1_vs_avg']
             for i in range(1, 7): cols.extend([f'wr{i}', f'st{i}', f'ex{i}', f'power_idx_{i}'])
@@ -156,13 +134,34 @@ def process_prediction(jcd, today, notified_ids, bst):
             best_idx = np.argmax(probs)
             combo, prob = COMBOS[best_idx], probs[best_idx]
 
+            # 3. 閾値チェック -> オッズ取得 -> 判断
             if prob >= THRESHOLD_NIRENTAN or win_p[best_b] >= THRESHOLD_TANSHO:
                 place = PLACE_NAMES.get(jcd, "会場")
-                print(f"🎯 候補発見: {place}{rno}R -> Groq問い合わせ中...")
+                print(f"🎯 候補: {place}{rno}R (Model: {win_p[best_b]:.0%}) -> オッズ確認中...")
                 
-                comment = call_groq_api(
-                    f"{place}{rno}R。単勝{best_b}({win_p[best_b]:.0%})、二連単{combo}({prob:.0%})。推奨理由を一言。"
-                )
+                # ★ここでリアルタイムオッズを取得
+                odds_data = scrape_odds(sess, jcd, rno, today)
+                
+                # ★Groqにオッズ情報を含めて判断させる
+                prompt = f"""
+                あなたはプロのボートレース投資家です。
+                AIモデルが以下のレースを推奨しました。実際のオッズを見て、利益が出そうなら「買い」、妙味がないなら「見（ケン）」と判断してください。
+                
+                【対象】{place}{rno}R (締切:{raw.get('deadline_time')})
+                【AI予測】
+                ・本命: {best_b}号艇 (勝率:{win_p[best_b]:.0%})
+                ・推奨2連単: {combo} (確率:{prob:.0%})
+                
+                【リアルタイムオッズ】
+                ・単勝: {odds_data['tansho']}
+                ・2連単: {odds_data['nirentan']} (※詳細はURL確認)
+                
+                【指示】
+                オッズが低すぎる(1.0-1.4倍など)場合は「見」を推奨してください。
+                結論を短く述べ、Discord通知用のメッセージを作成してください。
+                """
+                
+                comment = call_groq_api(prompt)
                 
                 pred_list.append({
                     'id': rid, 'jcd': jcd, 'rno': rno, 'date': today, 
@@ -174,7 +173,7 @@ def process_prediction(jcd, today, notified_ids, bst):
     return pred_list
 
 def main():
-    print(f"🚀 [Main] 高速予想Bot起動 (Model: {GROQ_MODEL_NAME})")
+    print(f"🚀 [Main] 統合型Bot起動 (Model: {GROQ_MODEL_NAME})")
     init_db()
     
     if not os.path.exists(MODEL_FILE):
@@ -188,14 +187,11 @@ def main():
                         if os.path.exists(part_name):
                             with open(part_name, 'rb') as f_in: f_out.write(f_in.read())
                         else: break
-
         if os.path.exists(ZIP_MODEL):
             print("📦 モデルを解凍中...")
             with zipfile.ZipFile(ZIP_MODEL, 'r') as f: f.extractall()
     
-    try: 
-        bst = lgb.Booster(model_file=MODEL_FILE)
-        print("✅ モデル読み込み成功")
+    try: bst = lgb.Booster(model_file=MODEL_FILE)
     except Exception as e:
         print(f"🔥 モデル読み込み失敗: {e}")
         return
@@ -234,11 +230,12 @@ def main():
                     (pred['id'], pred['date'], now_str, place, pred['rno'], pred['combo'], float(pred['prob']), pred['comment'], "PENDING", "", 0, 0, 0))
                 
                 t_disp = f"(締切 {pred['deadline']})" if pred['deadline'] else ""
-                msg = (f"🔥 **勝負レース予想** {place}{pred['rno']}R {t_disp}\n"
-                       f"🛶 単勝:{pred['best_boat']}艇({pred['win_prob']:.0%})\n"
-                       f"🎯 二連単:{pred['combo']}({pred['prob']:.0%})\n"
-                       f"🤖 {pred['comment']}\n"
-                       f"[出走表](https://www.boatrace.jp/owpc/pc/race/racelist?rno={pred['rno']}&jcd={pred['jcd']:02d}&hd={pred['date']})")
+                # ★オッズURLを追加して通知
+                odds_url = f"https://www.boatrace.jp/owpc/pc/race/oddstf?rno={pred['rno']}&jcd={pred['jcd']:02d}&hd={pred['date']}"
+                msg = (f"🔥 **勝負レース判定** {place}{pred['rno']}R {t_disp}\n"
+                       f"🛶 予測:{pred['best_boat']}艇 / {pred['combo']}\n"
+                       f"🤖 **AI判断**: {pred['comment']}\n"
+                       f"📊 [オッズ確認]({odds_url}) | [出走表](https://www.boatrace.jp/owpc/pc/race/racelist?rno={pred['rno']}&jcd={pred['jcd']:02d}&hd={pred['date']})")
                 send_discord(msg)
                 print(f"✅ 通知: {place}{pred['rno']}R")
             conn.commit()
