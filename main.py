@@ -50,7 +50,7 @@ def call_groq_api(prompt):
     data = {
         "model": GROQ_MODEL_NAME,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.7
+        "temperature": 0.5 # 創造性を下げて簡潔に
     }
     
     try:
@@ -139,26 +139,23 @@ def process_prediction(jcd, today, notified_ids, bst):
                 place = PLACE_NAMES.get(jcd, "会場")
                 print(f"🎯 候補: {place}{rno}R (Model: {win_p[best_b]:.0%}) -> オッズ確認中...")
                 
-                # ★ここでリアルタイムオッズを取得
                 odds_data = scrape_odds(sess, jcd, rno, today)
                 
-                # ★Groqにオッズ情報を含めて判断させる
+                # ★修正: 極めて簡潔に回答させるプロンプト
                 prompt = f"""
-                あなたはプロのボートレース投資家です。
-                AIモデルが以下のレースを推奨しました。実際のオッズを見て、利益が出そうなら「買い」、妙味がないなら「見（ケン）」と判断してください。
+                ボートレース投資の判断を行ってください。
                 
-                【対象】{place}{rno}R (締切:{raw.get('deadline_time')})
-                【AI予測】
-                ・本命: {best_b}号艇 (勝率:{win_p[best_b]:.0%})
-                ・推奨2連単: {combo} (確率:{prob:.0%})
-                
-                【リアルタイムオッズ】
-                ・単勝: {odds_data['tansho']}
-                ・2連単: {odds_data['nirentan']} (※詳細はURL確認)
+                【対象】{place}{rno}R
+                【AI予測】本命:{best_b}号艇 / 2連単:{combo}
+                【オッズ】単勝:{odds_data['tansho']} / 2連単:{odds_data['nirentan']}
                 
                 【指示】
-                オッズが低すぎる(1.0-1.4倍など)場合は「見」を推奨してください。
-                結論を短く述べ、Discord通知用のメッセージを作成してください。
+                オッズ妙味を考慮し「買い」か「見（ケン）」か判断してください。
+                Discord通知用のため、結論と理由を合わせて【40文字以内】で体言止めで書いてください。
+                挨拶や前置きは禁止です。
+                
+                例：「買い。1号艇の信頼度高く、2連単2.5倍なら利益確保可能。」
+                例：「見。単勝1.1倍はリスクリワード合わず。」
                 """
                 
                 comment = call_groq_api(prompt)
@@ -230,12 +227,13 @@ def main():
                     (pred['id'], pred['date'], now_str, place, pred['rno'], pred['combo'], float(pred['prob']), pred['comment'], "PENDING", "", 0, 0, 0))
                 
                 t_disp = f"(締切 {pred['deadline']})" if pred['deadline'] else ""
-                # ★オッズURLを追加して通知
                 odds_url = f"https://www.boatrace.jp/owpc/pc/race/oddstf?rno={pred['rno']}&jcd={pred['jcd']:02d}&hd={pred['date']}"
-                msg = (f"🔥 **勝負レース判定** {place}{pred['rno']}R {t_disp}\n"
-                       f"🛶 予測:{pred['best_boat']}艇 / {pred['combo']}\n"
-                       f"🤖 **AI判断**: {pred['comment']}\n"
-                       f"📊 [オッズ確認]({odds_url}) | [出走表](https://www.boatrace.jp/owpc/pc/race/racelist?rno={pred['rno']}&jcd={pred['jcd']:02d}&hd={pred['date']})")
+                
+                # 通知フォーマットも少しスリム化
+                msg = (f"🔥 **{place}{pred['rno']}R** {t_disp}\n"
+                       f"🛶 {pred['best_boat']}号艇 軸 / 2連単{pred['combo']}\n"
+                       f"🤖 {pred['comment']}\n"
+                       f"📊 [オッズ]({odds_url})")
                 send_discord(msg)
                 print(f"✅ 通知: {place}{pred['rno']}R")
             conn.commit()
