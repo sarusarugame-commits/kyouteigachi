@@ -9,7 +9,7 @@ import sqlite3
 import concurrent.futures
 import zipfile
 import traceback
-import threading  # ★並列処理用
+import threading
 
 # scraper.py から必要な機能をすべてインポート
 from scraper import scrape_race_data, scrape_odds, scrape_result
@@ -21,7 +21,7 @@ DB_FILE = "race_data.db"
 BET_AMOUNT = 1000
 THRESHOLD_NIRENTAN = 0.50
 THRESHOLD_TANSHO   = 0.75
-REPORT_HOURS = [13, 18, 23] # 報告を行う時間
+REPORT_HOURS = [13, 18, 23]
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL_NAME = "meta-llama/llama-4-scout-17b-16e-instruct"
@@ -85,27 +85,22 @@ def init_db():
 # 📊 報告・結果確認ロジック (別スレッド用)
 # ==========================================
 def report_worker():
-    """
-    裏で動き続け、結果確認と定期報告を行うスレッド
-    """
     print("📋 [Report] 報告スレッド起動 (バックグラウンド)")
     last_report_key = ""
     
     while True:
         try:
-            # 1. 結果チェック
             conn = sqlite3.connect(DB_FILE, timeout=30)
             conn.row_factory = sqlite3.Row
             c = conn.cursor()
             c.execute("SELECT * FROM history WHERE status='PENDING'")
             pending_races = c.fetchall()
-            conn.close() # 一旦閉じる
+            conn.close()
 
             if len(pending_races) > 0:
                 print(f"🔎 [Report] 結果待ち確認中... ({len(pending_races)}件)")
                 
             sess = requests.Session()
-            updated = False
             
             for race in pending_races:
                 try:
@@ -117,7 +112,6 @@ def report_worker():
                         is_win = 1 if race['predict_combo'] == res['combo'] else 0
                         profit = (res['payout'] - BET_AMOUNT) if is_win else -BET_AMOUNT
                         
-                        # DB更新用の接続を都度作る（競合回避）
                         conn = sqlite3.connect(DB_FILE, timeout=30)
                         c = conn.cursor()
                         c.execute("""
@@ -134,20 +128,16 @@ def report_worker():
                                f"収支:{'+' if profit>0 else ''}{profit}円")
                         send_discord(msg)
                         print(f"📊 [Report] 結果判明: {place}{rno}R")
-                        updated = True
-                        time.sleep(1) # 負荷軽減
+                        time.sleep(1)
                 except Exception as e:
                     print(f"⚠️ [Report] Check Error: {e}")
                     continue
 
-            # 2. 定期報告
             now = datetime.datetime.now(JST)
             today = now.strftime('%Y%m%d')
             current_key = f"{today}_{now.hour}"
             
-            # 報告時間 かつ まだ報告していない場合
             if now.hour in REPORT_HOURS and last_report_key != current_key:
-                # 23時はレースが終わるのを少し待つ
                 if now.hour == 23 and now.minute < 10:
                     pass
                 else:
@@ -172,7 +162,6 @@ def report_worker():
             print(f"🔥 [Report] Thread Error: {e}")
             traceback.print_exc()
         
-        # 10分待機 (メイン処理を邪魔しないよう長く)
         time.sleep(600)
 
 # ==========================================
@@ -233,10 +222,8 @@ def process_prediction(jcd, today, notified_ids, bst):
                 place = PLACE_NAMES.get(jcd, "会場")
                 print(f"🎯 [Main] 候補発見: {place}{rno}R (信頼度:{win_p[best_b]:.0%}) -> オッズ確認")
                 
-                # オッズ取得 (本命ターゲット指定)
                 odds_data = scrape_odds(sess, jcd, rno, today, target_boat=str(best_b), target_combo=combo)
                 
-                # AI判断 (簡潔に)
                 prompt = f"""
                 ボートレース投資判断。
                 【対象】{place}{rno}R (締切:{raw.get('deadline_time')})
@@ -265,7 +252,6 @@ def main():
     print(f"🚀 [Main] 完全統合Bot起動 (Model: {GROQ_MODEL_NAME})")
     init_db()
     
-    # モデル復元
     if not os.path.exists(MODEL_FILE):
         if not os.path.exists(ZIP_MODEL):
             if os.path.exists('model_part_1') or os.path.exists('model_part_01'):
@@ -286,17 +272,14 @@ def main():
         print(f"🔥 モデル読み込み失敗: {e}")
         return
 
-    # ★ここで報告用スレッドを起動（デーモン化＝メイン終了時に道連れで終了）
     t = threading.Thread(target=report_worker, daemon=True)
     t.start()
 
-    # メインループ（予想担当）
     while True:
         start_ts = time.time()
         now = datetime.datetime.now(JST)
         today = now.strftime('%Y%m%d')
         
-        # 23:10 終了
         if now.hour >= 23 and now.minute >= 10:
             print("🌙 業務終了")
             break
@@ -327,14 +310,17 @@ def main():
                 
                 t_disp = f"(締切 {pred['deadline']})" if pred['deadline'] else ""
                 odds_url = f"https://www.boatrace.jp/owpc/pc/race/oddstf?rno={pred['rno']}&jcd={pred['jcd']:02d}&hd={pred['date']}"
-                
                 odds_t = pred['odds'].get('tansho', '-')
                 odds_n = pred['odds'].get('nirentan', '-')
 
+                # ★修正: 自信度(%)を追加したフォーマット
                 msg = (f"🔥 **{place}{pred['rno']}R** {t_disp}\n"
-                       f"🛶 本命:{pred['best_boat']}号艇 / 推奨:{pred['combo']}\n"
-                       f"💰 単勝:{odds_t} / 2単:{odds_n}\n"
+                       f"🛶 本命: {pred['best_boat']}号艇 (勝率:{pred['win_prob']:.0%})\n"
+                       f"🎯 推奨: {pred['combo']} (的中率:{pred['prob']:.0%})\n"
+                       f"💰 オッズ: 単勝【{odds_t}】 / 2単【{odds_n}】\n"
+                       f"━━━━━━━━━━━━━━\n"
                        f"🤖 **{pred['comment']}**\n"
+                       f"━━━━━━━━━━━━━━\n"
                        f"📊 [オッズ]({odds_url})")
                 send_discord(msg)
                 print(f"✅ [Main] 通知: {place}{pred['rno']}R")
