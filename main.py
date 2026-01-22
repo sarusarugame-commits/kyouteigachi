@@ -50,7 +50,7 @@ def call_groq_api(prompt):
     data = {
         "model": GROQ_MODEL_NAME,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.5 # 創造性を下げて簡潔に
+        "temperature": 0.5
     }
     
     try:
@@ -141,7 +141,7 @@ def process_prediction(jcd, today, notified_ids, bst):
                 
                 odds_data = scrape_odds(sess, jcd, rno, today)
                 
-                # ★修正: 極めて簡潔に回答させるプロンプト
+                # 簡潔に回答させるプロンプト
                 prompt = f"""
                 ボートレース投資の判断を行ってください。
                 
@@ -153,9 +153,6 @@ def process_prediction(jcd, today, notified_ids, bst):
                 オッズ妙味を考慮し「買い」か「見（ケン）」か判断してください。
                 Discord通知用のため、結論と理由を合わせて【40文字以内】で体言止めで書いてください。
                 挨拶や前置きは禁止です。
-                
-                例：「買い。1号艇の信頼度高く、2連単2.5倍なら利益確保可能。」
-                例：「見。単勝1.1倍はリスクリワード合わず。」
                 """
                 
                 comment = call_groq_api(prompt)
@@ -164,7 +161,8 @@ def process_prediction(jcd, today, notified_ids, bst):
                     'id': rid, 'jcd': jcd, 'rno': rno, 'date': today, 
                     'combo': combo, 'prob': prob, 'best_boat': best_b, 
                     'win_prob': win_p[best_b], 'comment': comment, 
-                    'deadline': raw.get('deadline_time')
+                    'deadline': raw.get('deadline_time'),
+                    'odds': odds_data # ★ここにオッズデータを格納
                 })
         except: continue
     return pred_list
@@ -229,10 +227,16 @@ def main():
                 t_disp = f"(締切 {pred['deadline']})" if pred['deadline'] else ""
                 odds_url = f"https://www.boatrace.jp/owpc/pc/race/oddstf?rno={pred['rno']}&jcd={pred['jcd']:02d}&hd={pred['date']}"
                 
-                # 通知フォーマットも少しスリム化
+                # ★オッズ情報を整形
+                odds_tansho = pred['odds'].get('tansho', '---')
+                odds_niren  = pred['odds'].get('nirentan', '---')
+
+                # ★通知メッセージにオッズ情報を追加
                 msg = (f"🔥 **{place}{pred['rno']}R** {t_disp}\n"
-                       f"🛶 {pred['best_boat']}号艇 軸 / 2連単{pred['combo']}\n"
-                       f"🤖 {pred['comment']}\n"
+                       f"🛶 本命:{pred['best_boat']}号艇 / 推奨:{pred['combo']}\n"
+                       f"💰 単勝:{odds_tansho}\n"
+                       f"💰 2単:{odds_niren}\n"
+                       f"🤖 **{pred['comment']}**\n"
                        f"📊 [オッズ]({odds_url})")
                 send_discord(msg)
                 print(f"✅ 通知: {place}{pred['rno']}R")
