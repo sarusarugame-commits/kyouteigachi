@@ -41,7 +41,9 @@ JST = datetime.timezone(t_delta, 'JST')
 # ==========================================
 def call_groq_api(prompt):
     api_key = os.environ.get("GROQ_API_KEY", "").strip()
-    if not api_key: return "APIキー未設定"
+    if not api_key: 
+        print("❌ [Groq] API Key Missing")
+        return "APIキー未設定"
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -50,22 +52,30 @@ def call_groq_api(prompt):
     data = {
         "model": GROQ_MODEL_NAME,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.5
+        "temperature": 0.7 # 少し上げて自然な文章に
     }
     
     try:
+        print(f"📤 [Groq] Requesting analysis...")
         res = requests.post(GROQ_API_URL, headers=headers, json=data, timeout=30)
         if res.status_code == 200:
+            print(f"✅ [Groq] Response received.")
             return res.json()['choices'][0]['message']['content']
         else:
-            print(f"⚠️ Groq Error: {res.status_code}")
+            print(f"⚠️ [Groq] Error: {res.status_code} {res.text}")
             return f"エラー({res.status_code})"
-    except: return "応答なし"
+    except Exception as e:
+        print(f"🔥 [Groq] Exception: {e}")
+        return "応答なし"
 
 def send_discord(content):
     url = os.environ.get("DISCORD_WEBHOOK_URL")
-    if not url: return
-    try: requests.post(url, json={"content": content}, timeout=10)
+    if not url: 
+        print("⚠️ [Discord] Webhook URL Missing")
+        return
+    try: 
+        print(f"📤 [Discord] Sending notification...")
+        requests.post(url, json={"content": content}, timeout=10)
     except: pass
 
 # ==========================================
@@ -120,7 +130,12 @@ def process_prediction(jcd, today, notified_ids, bst):
             # 1. レース情報取得
             raw = scrape_race_data(sess, jcd, rno, today)
             if not raw: continue 
-            if not is_target_race(raw.get('deadline_time'), now): continue
+            
+            # 時間チェック
+            deadline = raw.get('deadline_time')
+            if not is_target_race(deadline, now): 
+                # print(f"  [Skip] {jcd}-{rno}R (Deadline: {deadline})") # うるさいのでコメントアウト
+                continue
             
             # 2. モデル予測
             df = engineer_features(pd.DataFrame([raw]))
@@ -134,25 +149,27 @@ def process_prediction(jcd, today, notified_ids, bst):
             best_idx = np.argmax(probs)
             combo, prob = COMBOS[best_idx], probs[best_idx]
 
-            # 3. 閾値チェック -> オッズ取得 -> 判断
+            # 3. 判定
             if prob >= THRESHOLD_NIRENTAN or win_p[best_b] >= THRESHOLD_TANSHO:
                 place = PLACE_NAMES.get(jcd, "会場")
-                print(f"🎯 候補: {place}{rno}R (Model: {win_p[best_b]:.0%}) -> オッズ確認中...")
+                print(f"🎯 候補発見: {place}{rno}R (Model: {win_p[best_b]:.0%}) -> オッズ取得へ")
                 
-                odds_data = scrape_odds(sess, jcd, rno, today)
+                # ★修正: ターゲットを指定してオッズ取得
+                odds_data = scrape_odds(sess, jcd, rno, today, target_boat=str(best_b), target_combo=combo)
+                print(f"📊 オッズ取得完了: 単{odds_data['tansho']} / 2単{odds_data['nirentan']}")
                 
-                # 簡潔に回答させるプロンプト
+                # ★修正: 回答を少し長くするプロンプト
                 prompt = f"""
-                ボートレース投資の判断を行ってください。
+                ボートレース投資の判断をお願いします。
                 
-                【対象】{place}{rno}R
-                【AI予測】本命:{best_b}号艇 / 2連単:{combo}
-                【オッズ】単勝:{odds_data['tansho']} / 2連単:{odds_data['nirentan']}
+                【対象】{place}{rno}R (締切:{deadline})
+                【AI予測】本命:{best_b}号艇 / 2連単:{combo} (信頼度:{prob:.0%})
+                【現在オッズ】単勝:{odds_data['tansho']} / 2連単:{odds_data['nirentan']}
                 
                 【指示】
-                オッズ妙味を考慮し「買い」か「見（ケン）」か判断してください。
-                Discord通知用のため、結論と理由を合わせて【40文字以内】で体言止めで書いてください。
-                挨拶や前置きは禁止です。
+                オッズと信頼度を比較し、「買い」か「見（ケン）」か判断してください。
+                理由も含めて、100文字〜150文字程度で簡潔に解説してください。
+                最後に必ず結論（買いor見）を明記してください。
                 """
                 
                 comment = call_groq_api(prompt)
@@ -161,10 +178,12 @@ def process_prediction(jcd, today, notified_ids, bst):
                     'id': rid, 'jcd': jcd, 'rno': rno, 'date': today, 
                     'combo': combo, 'prob': prob, 'best_boat': best_b, 
                     'win_prob': win_p[best_b], 'comment': comment, 
-                    'deadline': raw.get('deadline_time'),
-                    'odds': odds_data # ★ここにオッズデータを格納
+                    'deadline': deadline,
+                    'odds': odds_data
                 })
-        except: continue
+        except Exception as e:
+            print(f"❌ Error processing {jcd}-{rno}: {e}")
+            continue
     return pred_list
 
 def main():
@@ -206,7 +225,7 @@ def main():
         notified_ids = set(row[0] for row in c.fetchall())
         conn.close()
 
-        print(f"⚡️ スキャン: {now.strftime('%H:%M:%S')}")
+        print(f"⚡️ スキャン開始: {now.strftime('%H:%M:%S')} (済:{len(notified_ids)}件)")
         
         new_preds = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
@@ -227,19 +246,18 @@ def main():
                 t_disp = f"(締切 {pred['deadline']})" if pred['deadline'] else ""
                 odds_url = f"https://www.boatrace.jp/owpc/pc/race/oddstf?rno={pred['rno']}&jcd={pred['jcd']:02d}&hd={pred['date']}"
                 
-                # ★オッズ情報を整形
-                odds_tansho = pred['odds'].get('tansho', '---')
-                odds_niren  = pred['odds'].get('nirentan', '---')
+                odds_t = pred['odds'].get('tansho', '-')
+                odds_n = pred['odds'].get('nirentan', '-')
 
-                # ★通知メッセージにオッズ情報を追加
                 msg = (f"🔥 **{place}{pred['rno']}R** {t_disp}\n"
-                       f"🛶 本命:{pred['best_boat']}号艇 / 推奨:{pred['combo']}\n"
-                       f"💰 単勝:{odds_tansho}\n"
-                       f"💰 2単:{odds_niren}\n"
-                       f"🤖 **{pred['comment']}**\n"
+                       f"🛶 予測: {pred['best_boat']}号艇 → {pred['combo']}\n"
+                       f"💰 オッズ: 単勝【{odds_t}】 / 2単【{odds_n}】\n"
+                       f"━━━━━━━━━━━━━━\n"
+                       f"🤖 {pred['comment']}\n"
+                       f"━━━━━━━━━━━━━━\n"
                        f"📊 [オッズ]({odds_url})")
                 send_discord(msg)
-                print(f"✅ 通知: {place}{pred['rno']}R")
+                print(f"✅ 通知送信: {place}{pred['rno']}R")
             conn.commit()
             conn.close()
 
