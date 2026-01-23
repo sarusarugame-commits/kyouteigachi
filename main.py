@@ -42,16 +42,16 @@ PLACE_NAMES = {
 t_delta = datetime.timedelta(hours=9)
 JST = datetime.timezone(t_delta, 'JST')
 
+# スキャン数カウンター（グローバル変数）
+SCANNED_RACES_COUNT = 0
+
 # ==========================================
 # 🛠️ ユーティリティ & API
 # ==========================================
 def extract_odds_value(odds_text, target_boat=None):
     try:
-        # "1.5" のような単数値の場合
-        if re.match(r"^\d+\.\d+$", odds_text):
+        if re.match(r"^\d+\.\d+$", str(odds_text)):
             return float(odds_text)
-        
-        # 文字列の中から数値を探す
         match = re.search(r"(\d+\.\d+)", str(odds_text))
         if match:
             return float(match.group(1))
@@ -69,7 +69,7 @@ def call_groq_api(prompt):
     data = {
         "model": GROQ_MODEL_NAME,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.3 # 論理的判断のため温度を下げる
+        "temperature": 0.3
     }
     try:
         res = requests.post(GROQ_API_URL, headers=headers, json=data, timeout=30)
@@ -89,7 +89,7 @@ def send_discord(content):
 def init_db():
     conn = sqlite3.connect(DB_FILE, timeout=30)
     c = conn.cursor()
-    # ★重要: WALモードを有効化して、読み書きの競合を防ぐ
+    # ★重要: WALモードを有効化 (読み書き競合を回避)
     c.execute("PRAGMA journal_mode=WAL;")
     c.execute('''CREATE TABLE IF NOT EXISTS history (
         race_id TEXT PRIMARY KEY, date TEXT, time TEXT, place TEXT, race_no INTEGER,
@@ -105,11 +105,12 @@ def init_db():
 def report_worker():
     print("📋 [Report] 報告スレッド起動")
     last_report_key = ""
+    global SCANNED_RACES_COUNT
     
     while True:
         try:
-            # DB接続
-            conn = sqlite3.connect(DB_FILE, timeout=30)
+            # DB接続 (タイムアウト長めに)
+            conn = sqlite3.connect(DB_FILE, timeout=60)
             conn.row_factory = sqlite3.Row
             c = conn.cursor()
             
@@ -130,7 +131,7 @@ def report_worker():
                         is_win = 1 if race['predict_combo'] == res['combo'] else 0
                         profit = (res['payout'] - BET_AMOUNT) if is_win else -BET_AMOUNT
                         
-                        # DB更新 (このスレッド内で完結させる)
+                        # DB更新 (即コミット)
                         c.execute("""
                             UPDATE history 
                             SET result_combo=?, is_win=?, payout=?, profit=?, status='FINISHED' 
@@ -138,6 +139,7 @@ def report_worker():
                         """, (res['combo'], is_win, res['payout'], profit, race['race_id']))
                         
                         updates += 1
+                        conn.commit() # 1件ごとに確実コミット
                         
                         place = PLACE_NAMES.get(jcd, "会場")
                         msg = (f"{'🎊 的中' if is_win else '💀 外れ'} {place}{rno}R\n"
@@ -149,7 +151,7 @@ def report_worker():
                 except: continue
             
             if updates > 0:
-                conn.commit()
+                print(f"✅ [Report] {updates}件の結果を更新しました")
 
             # 2. 定期報告チェック
             now = datetime.datetime.now(JST)
@@ -162,16 +164,16 @@ def report_worker():
                 c.execute("SELECT count(*) FROM history WHERE date=? AND status='PENDING'", (today,))
                 pending_cnt = c.fetchone()[0]
                 
-                # 生存報告も兼ねて必ず送る
-                status_emoji = "🟢" if (pending_cnt > 0) else "💤"
+                # 生存報告
+                status_emoji = "🟢"
                 msg = (f"**🛠️ {now.hour}時の定期報告**\n"
-                       f"状態: {status_emoji} 稼働中\n"
-                       f"✅ 完了: {cnt or 0}R (的中: {wins or 0})\n"
-                       f"⏳ 待機: {pending_cnt or 0}R\n"
-                       f"💵 収支: {'+' if (profit or 0)>0 else ''}{profit or 0}円")
+                       f"👀 スキャン済み: {SCANNED_RACES_COUNT}R\n"
+                       f"✅ 結果判明: {cnt or 0}R (的中: {wins or 0})\n"
+                       f"⏳ 結果待ち: {pending_cnt or 0}R\n"
+                       f"💵 本日収支: {'+' if (profit or 0)>0 else ''}{profit or 0}円")
                 
                 send_discord(msg)
-                print(f"📢 [Report] 定期報告送信: {now.hour}時")
+                print(f"📢 [Report] 定期報告送信: {now.hour}時 (Wait:{pending_cnt})")
                 last_report_key = current_key
 
             conn.close()
@@ -211,21 +213,23 @@ def is_target_race(deadline_str, now_dt):
         return (d_dt - now_dt) <= datetime.timedelta(minutes=60)
     except: return True
 
-# ★修正: オッズ取得のリトライ機能
 def get_odds_with_retry(sess, jcd, rno, today, best_b, combo):
-    for _ in range(3): # 3回リトライ
+    for _ in range(3):
         odds_data = scrape_odds(sess, jcd, rno, today, target_boat=str(best_b), target_combo=combo)
         if odds_data['tansho'] != "---" or odds_data['nirentan'] != "---":
             return odds_data
         time.sleep(2)
-    return {"tansho": "1.0", "nirentan": "1.0"} # 失敗時は最低値
+    return {"tansho": "1.0", "nirentan": "1.0"}
 
 def process_prediction(jcd, today, notified_ids, bst):
+    global SCANNED_RACES_COUNT
     pred_list = []
     sess = requests.Session()
     now = datetime.datetime.now(JST)
     
     for rno in range(1, 13):
+        SCANNED_RACES_COUNT += 1 # スキャン数をカウントアップ
+        
         rid = f"{today}_{str(jcd).zfill(2)}_{rno}"
         if rid in notified_ids: continue
         
@@ -249,17 +253,13 @@ def process_prediction(jcd, today, notified_ids, bst):
                 place = PLACE_NAMES.get(jcd, "会場")
                 print(f"🎯 [Main] 候補発見: {place}{rno}R (Model:{win_p[best_b]:.0%}) -> オッズ確認")
                 
-                # オッズ取得（リトライ付き）
                 odds_data = get_odds_with_retry(sess, jcd, rno, today, best_b, combo)
-                
-                # 期待値計算 (AI単勝勝率 × リアルタイム単勝オッズ)
                 real_odds = extract_odds_value(odds_data['tansho'])
                 if real_odds == 0: real_odds = 1.0
                 expected_value = real_odds * win_p[best_b]
                 
-                print(f"💰 [Main] 期待値: {expected_value:.2f} (オッズ{real_odds} x 勝率{win_p[best_b]:.2f})")
+                print(f"💰 [Main] 期待値: {expected_value:.2f}")
 
-                # ★修正: AIへの指示を数値ベースで厳格化
                 prompt = f"""
                 あなたはボートレースの投資アルゴリズムです。以下の数値に基づき判断してください。
                 
@@ -272,9 +272,6 @@ def process_prediction(jcd, today, notified_ids, bst):
                 2. EVが1.0未満の場合は、必ず「見」としてください。
                 3. EVが1.0以上の場合は「買い」としてください。
                 4. 理由は40文字以内で簡潔に述べてください。
-                
-                例：「見。期待値0.85でリスクに見合わず。」
-                例：「買い。期待値1.20でプラス収支が狙える。」
                 """
                 
                 comment = call_groq_api(prompt)
@@ -347,13 +344,19 @@ def main():
                 except: pass
         
         if new_preds:
+            # DB書き込み時もWALモードを考慮
             conn = sqlite3.connect(DB_FILE, timeout=30)
             c = conn.cursor()
+            c.execute("PRAGMA journal_mode=WAL;")
+            
             for pred in new_preds:
                 now_str = datetime.datetime.now(JST).strftime('%H:%M:%S')
                 place = PLACE_NAMES.get(pred['jcd'], "不明")
+                
+                # ★修正: 書き込み後に即コミット
                 c.execute("INSERT OR IGNORE INTO history VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (pred['id'], pred['date'], now_str, place, pred['rno'], pred['combo'], float(pred['prob']), pred['comment'], "PENDING", "", 0, 0, 0))
+                conn.commit()
                 
                 t_disp = f"(締切 {pred['deadline']})" if pred['deadline'] else ""
                 odds_url = f"https://www.boatrace.jp/owpc/pc/race/oddstf?rno={pred['rno']}&jcd={pred['jcd']:02d}&hd={pred['date']}"
@@ -371,8 +374,8 @@ def main():
                        f"━━━━━━━━━━━━━━\n"
                        f"📊 [オッズ確認]({odds_url})")
                 send_discord(msg)
-                print(f"✅ [Main] 通知: {place}{pred['rno']}R")
-            conn.commit()
+                print(f"✅ [Main] 通知送信完了: {place}{pred['rno']}R")
+            
             conn.close()
 
         elapsed = time.time() - start_ts
