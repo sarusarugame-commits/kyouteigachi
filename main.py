@@ -43,7 +43,7 @@ PLACE_NAMES = {
 t_delta = datetime.timedelta(hours=9)
 JST = datetime.timezone(t_delta, 'JST')
 
-# ★修正: 処理済み・見送り済みレースを記憶して無駄なスキャンを防ぐ
+# 無駄なスキャンを防ぐための「無視リスト」
 IGNORE_RACES = set()
 
 # ==========================================
@@ -116,19 +116,25 @@ def report_worker():
             conn = get_db_connection()
             c = conn.cursor()
             
-            # ★ここが重要: 全レースではなく、DBにある「自分が予想した(PENDING)」レースだけを確認
+            # ★修正: DBにある「PENDING（結果待ち）」のレースだけを取得
+            # 今までのバグでstatus=0になっているものも救済する場合は OR status='0' をつけるが
+            # 新規データは正しくPENDINGになるため、ここでは標準ロジックにする
             c.execute("SELECT * FROM history WHERE status='PENDING'")
             pending_races = c.fetchall()
+            
+            if len(pending_races) > 0:
+                print(f"🔎 [Report] 結果待ち確認中: {len(pending_races)}件")
             
             sess = requests.Session()
             updates = 0
             
+            # DBにある「自分が予想したレース」だけをチェックしに行く
             for race in pending_races:
                 try:
                     parts = race['race_id'].split('_')
                     date_str, jcd, rno = parts[0], int(parts[1]), int(parts[2])
                     
-                    # 結果を取得
+                    # 結果スクレイピング
                     res = scrape_result(sess, jcd, rno, date_str)
                     
                     # 結果が出ていれば更新
@@ -162,15 +168,16 @@ def report_worker():
             current_key = f"{today}_{now.hour}"
             
             if now.hour in REPORT_HOURS and last_report_key != current_key:
+                # 今日の成績
                 c.execute("SELECT count(*), sum(is_win), sum(profit) FROM history WHERE date=? AND status='FINISHED'", (today,))
                 cnt, wins, profit = c.fetchone()
                 
+                # 全期間の結果待ち件数
                 c.execute("SELECT count(*) FROM history WHERE status='PENDING'")
                 pending_cnt = c.fetchone()[0]
                 
                 status_emoji = "🟢" if (pending_cnt > 0) else "💤"
                 msg = (f"**🛠️ {now.hour}時の定期報告**\n"
-                       f"状態: {status_emoji} 稼働中\n"
                        f"✅ 結果判明: {cnt or 0}R (的中: {wins or 0})\n"
                        f"⏳ 結果待ち: {pending_cnt or 0}R\n"
                        f"💵 本日収支: {'+' if (profit or 0)>0 else ''}{profit or 0}円")
@@ -233,13 +240,12 @@ def process_prediction(jcd, today, notified_ids, bst):
     for rno in range(1, 13):
         rid = f"{today}_{str(jcd).zfill(2)}_{rno}"
         
-        # 処理済み or 見送り済みならスキップ (無駄なアクセス防止)
+        # 通知済み または 無視リスト入りならスキップ
         if rid in notified_ids or rid in IGNORE_RACES: continue
         
         try:
             raw = scrape_race_data(sess, jcd, rno, today)
             
-            # データなし or 締切過ぎなら、今後も無視リストへ
             if not raw:
                 IGNORE_RACES.add(rid) 
                 continue
@@ -258,7 +264,6 @@ def process_prediction(jcd, today, notified_ids, bst):
             best_idx = np.argmax(probs)
             combo, prob = COMBOS[best_idx], probs[best_idx]
 
-            # 閾値チェック
             if prob >= THRESHOLD_NIRENTAN or win_p[best_b] >= THRESHOLD_TANSHO:
                 place = PLACE_NAMES.get(jcd, "会場")
                 print(f"🎯 [Main] 候補発見: {place}{rno}R (Model:{win_p[best_b]:.0%}) -> オッズ確認")
@@ -295,9 +300,6 @@ def process_prediction(jcd, today, notified_ids, bst):
                     'ev': expected_value
                 })
             else:
-                # 閾値以下なら無視リストへ (次回からスキップ)
-                # ただしオッズは変動するため、完全に無視するかは戦略次第だが
-                # 今回は負荷軽減のため無視リストに入れる
                 IGNORE_RACES.add(rid)
 
         except: continue
@@ -368,8 +370,10 @@ def main():
                     now_str = datetime.datetime.now(JST).strftime('%H:%M:%S')
                     place = PLACE_NAMES.get(pred['jcd'], "不明")
                     
+                    # ★修正: 列ズレを解消 (PENDINGを正しいstatus列へ)
+                    # result_combo="" (9), is_win=0 (10), payout=0 (11), profit=0 (12), status="PENDING" (13)
                     c.execute("INSERT OR IGNORE INTO history VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                        (pred['id'], pred['date'], now_str, place, pred['rno'], pred['combo'], float(pred['prob']), pred['comment'], "PENDING", "", 0, 0, 0))
+                        (pred['id'], pred['date'], now_str, place, pred['rno'], pred['combo'], float(pred['prob']), pred['comment'], "", 0, 0, 0, "PENDING"))
                     
                     print(f"💾 [DB] 登録完了: {pred['id']}")
 
