@@ -20,10 +20,11 @@ from scraper import scrape_race_data, scrape_odds, scrape_result
 # ==========================================
 DB_FILE = "race_data.db"
 BET_AMOUNT = 1000
-THRESHOLD_NIRENTAN = 0.50
-THRESHOLD_TANSHO   = 0.75
 
-# 毎時報告 (8時〜23時)
+# 閾値設定
+THRESHOLD_NIRENTAN = 0.15
+THRESHOLD_TANSHO   = 0.40
+
 REPORT_HOURS = list(range(8, 24))
 
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
@@ -42,8 +43,8 @@ PLACE_NAMES = {
 t_delta = datetime.timedelta(hours=9)
 JST = datetime.timezone(t_delta, 'JST')
 
-# スキャン数カウンター（グローバル変数）
-SCANNED_RACES_COUNT = 0
+# ★修正: 処理済み・見送り済みレースを記憶して無駄なスキャンを防ぐ
+IGNORE_RACES = set()
 
 # ==========================================
 # 🛠️ ユーティリティ & API
@@ -86,17 +87,21 @@ def send_discord(content):
     try: requests.post(url, json={"content": content}, timeout=10)
     except: pass
 
+def get_db_connection():
+    # オートコミットモード (即時保存)
+    conn = sqlite3.connect(DB_FILE, timeout=60, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    return conn
+
 def init_db():
-    conn = sqlite3.connect(DB_FILE, timeout=30)
+    conn = get_db_connection()
     c = conn.cursor()
-    # ★重要: WALモードを有効化 (読み書き競合を回避)
     c.execute("PRAGMA journal_mode=WAL;")
     c.execute('''CREATE TABLE IF NOT EXISTS history (
         race_id TEXT PRIMARY KEY, date TEXT, time TEXT, place TEXT, race_no INTEGER,
         predict_combo TEXT, predict_prob REAL, gemini_comment TEXT,
         result_combo TEXT, is_win INTEGER, payout INTEGER, profit INTEGER, status TEXT
     )''')
-    conn.commit()
     conn.close()
 
 # ==========================================
@@ -105,16 +110,13 @@ def init_db():
 def report_worker():
     print("📋 [Report] 報告スレッド起動")
     last_report_key = ""
-    global SCANNED_RACES_COUNT
     
     while True:
         try:
-            # DB接続 (タイムアウト長めに)
-            conn = sqlite3.connect(DB_FILE, timeout=60)
-            conn.row_factory = sqlite3.Row
+            conn = get_db_connection()
             c = conn.cursor()
             
-            # 1. 結果チェック (PENDINGのものを確認)
+            # ★ここが重要: 全レースではなく、DBにある「自分が予想した(PENDING)」レースだけを確認
             c.execute("SELECT * FROM history WHERE status='PENDING'")
             pending_races = c.fetchall()
             
@@ -126,12 +128,14 @@ def report_worker():
                     parts = race['race_id'].split('_')
                     date_str, jcd, rno = parts[0], int(parts[1]), int(parts[2])
                     
+                    # 結果を取得
                     res = scrape_result(sess, jcd, rno, date_str)
+                    
+                    # 結果が出ていれば更新
                     if res:
                         is_win = 1 if race['predict_combo'] == res['combo'] else 0
                         profit = (res['payout'] - BET_AMOUNT) if is_win else -BET_AMOUNT
                         
-                        # DB更新 (即コミット)
                         c.execute("""
                             UPDATE history 
                             SET result_combo=?, is_win=?, payout=?, profit=?, status='FINISHED' 
@@ -139,7 +143,6 @@ def report_worker():
                         """, (res['combo'], is_win, res['payout'], profit, race['race_id']))
                         
                         updates += 1
-                        conn.commit() # 1件ごとに確実コミット
                         
                         place = PLACE_NAMES.get(jcd, "会場")
                         msg = (f"{'🎊 的中' if is_win else '💀 外れ'} {place}{rno}R\n"
@@ -147,13 +150,13 @@ def report_worker():
                                f"収支:{'+' if profit>0 else ''}{profit}円")
                         send_discord(msg)
                         print(f"📊 [Report] 結果判明: {place}{rno}R")
-                        time.sleep(1)
+                        time.sleep(1) 
                 except: continue
             
             if updates > 0:
-                print(f"✅ [Report] {updates}件の結果を更新しました")
+                print(f"✅ [Report] {updates}件の結果を確定しました")
 
-            # 2. 定期報告チェック
+            # 定期報告
             now = datetime.datetime.now(JST)
             today = now.strftime('%Y%m%d')
             current_key = f"{today}_{now.hour}"
@@ -161,19 +164,19 @@ def report_worker():
             if now.hour in REPORT_HOURS and last_report_key != current_key:
                 c.execute("SELECT count(*), sum(is_win), sum(profit) FROM history WHERE date=? AND status='FINISHED'", (today,))
                 cnt, wins, profit = c.fetchone()
-                c.execute("SELECT count(*) FROM history WHERE date=? AND status='PENDING'", (today,))
+                
+                c.execute("SELECT count(*) FROM history WHERE status='PENDING'")
                 pending_cnt = c.fetchone()[0]
                 
-                # 生存報告
-                status_emoji = "🟢"
+                status_emoji = "🟢" if (pending_cnt > 0) else "💤"
                 msg = (f"**🛠️ {now.hour}時の定期報告**\n"
-                       f"👀 スキャン済み: {SCANNED_RACES_COUNT}R\n"
+                       f"状態: {status_emoji} 稼働中\n"
                        f"✅ 結果判明: {cnt or 0}R (的中: {wins or 0})\n"
                        f"⏳ 結果待ち: {pending_cnt or 0}R\n"
                        f"💵 本日収支: {'+' if (profit or 0)>0 else ''}{profit or 0}円")
                 
                 send_discord(msg)
-                print(f"📢 [Report] 定期報告送信: {now.hour}時 (Wait:{pending_cnt})")
+                print(f"📢 [Report] 定期報告送信: {now.hour}時")
                 last_report_key = current_key
 
             conn.close()
@@ -222,21 +225,27 @@ def get_odds_with_retry(sess, jcd, rno, today, best_b, combo):
     return {"tansho": "1.0", "nirentan": "1.0"}
 
 def process_prediction(jcd, today, notified_ids, bst):
-    global SCANNED_RACES_COUNT
+    global IGNORE_RACES
     pred_list = []
     sess = requests.Session()
     now = datetime.datetime.now(JST)
     
     for rno in range(1, 13):
-        SCANNED_RACES_COUNT += 1 # スキャン数をカウントアップ
-        
         rid = f"{today}_{str(jcd).zfill(2)}_{rno}"
-        if rid in notified_ids: continue
+        
+        # 処理済み or 見送り済みならスキップ (無駄なアクセス防止)
+        if rid in notified_ids or rid in IGNORE_RACES: continue
         
         try:
             raw = scrape_race_data(sess, jcd, rno, today)
-            if not raw: continue 
-            if not is_target_race(raw.get('deadline_time'), now): continue
+            
+            # データなし or 締切過ぎなら、今後も無視リストへ
+            if not raw:
+                IGNORE_RACES.add(rid) 
+                continue
+            if not is_target_race(raw.get('deadline_time'), now):
+                IGNORE_RACES.add(rid)
+                continue
             
             df = engineer_features(pd.DataFrame([raw]))
             cols = ['jcd', 'rno', 'wind', 'wr_1_vs_avg']
@@ -249,6 +258,7 @@ def process_prediction(jcd, today, notified_ids, bst):
             best_idx = np.argmax(probs)
             combo, prob = COMBOS[best_idx], probs[best_idx]
 
+            # 閾値チェック
             if prob >= THRESHOLD_NIRENTAN or win_p[best_b] >= THRESHOLD_TANSHO:
                 place = PLACE_NAMES.get(jcd, "会場")
                 print(f"🎯 [Main] 候補発見: {place}{rno}R (Model:{win_p[best_b]:.0%}) -> オッズ確認")
@@ -284,6 +294,12 @@ def process_prediction(jcd, today, notified_ids, bst):
                     'odds': odds_data,
                     'ev': expected_value
                 })
+            else:
+                # 閾値以下なら無視リストへ (次回からスキップ)
+                # ただしオッズは変動するため、完全に無視するかは戦略次第だが
+                # 今回は負荷軽減のため無視リストに入れる
+                IGNORE_RACES.add(rid)
+
         except: continue
     return pred_list
 
@@ -328,7 +344,7 @@ def main():
             print("🛑 タイムリミット (再起動待機)")
             break
 
-        conn = sqlite3.connect(DB_FILE, timeout=30)
+        conn = get_db_connection()
         c = conn.cursor()
         c.execute("SELECT race_id FROM history")
         notified_ids = set(row[0] for row in c.fetchall())
@@ -344,38 +360,39 @@ def main():
                 except: pass
         
         if new_preds:
-            # DB書き込み時もWALモードを考慮
-            conn = sqlite3.connect(DB_FILE, timeout=30)
+            conn = get_db_connection()
             c = conn.cursor()
-            c.execute("PRAGMA journal_mode=WAL;")
             
             for pred in new_preds:
-                now_str = datetime.datetime.now(JST).strftime('%H:%M:%S')
-                place = PLACE_NAMES.get(pred['jcd'], "不明")
-                
-                # ★修正: 書き込み後に即コミット
-                c.execute("INSERT OR IGNORE INTO history VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (pred['id'], pred['date'], now_str, place, pred['rno'], pred['combo'], float(pred['prob']), pred['comment'], "PENDING", "", 0, 0, 0))
-                conn.commit()
-                
-                t_disp = f"(締切 {pred['deadline']})" if pred['deadline'] else ""
-                odds_url = f"https://www.boatrace.jp/owpc/pc/race/oddstf?rno={pred['rno']}&jcd={pred['jcd']:02d}&hd={pred['date']}"
-                odds_t = pred['odds'].get('tansho', '-')
-                odds_n = pred['odds'].get('nirentan', '-')
-                ev_val = pred.get('ev', 0.0)
+                try:
+                    now_str = datetime.datetime.now(JST).strftime('%H:%M:%S')
+                    place = PLACE_NAMES.get(pred['jcd'], "不明")
+                    
+                    c.execute("INSERT OR IGNORE INTO history VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (pred['id'], pred['date'], now_str, place, pred['rno'], pred['combo'], float(pred['prob']), pred['comment'], "PENDING", "", 0, 0, 0))
+                    
+                    print(f"💾 [DB] 登録完了: {pred['id']}")
 
-                msg = (f"🔥 **{place}{pred['rno']}R** {t_disp}\n"
-                       f"🛶 本命: {pred['best_boat']}号艇 (勝率:{pred['win_prob']:.0%})\n"
-                       f"🎯 推奨: {pred['combo']} (的中:{pred['prob']:.0%})\n"
-                       f"💰 オッズ: 単{odds_t} / 2単{odds_n}\n"
-                       f"📈 期待値: {ev_val:.2f} (1.0超で狙い目)\n"
-                       f"━━━━━━━━━━━━━━\n"
-                       f"🤖 **{pred['comment']}**\n"
-                       f"━━━━━━━━━━━━━━\n"
-                       f"📊 [オッズ確認]({odds_url})")
-                send_discord(msg)
-                print(f"✅ [Main] 通知送信完了: {place}{pred['rno']}R")
-            
+                    t_disp = f"(締切 {pred['deadline']})" if pred['deadline'] else ""
+                    odds_url = f"https://www.boatrace.jp/owpc/pc/race/oddstf?rno={pred['rno']}&jcd={pred['jcd']:02d}&hd={pred['date']}"
+                    odds_t = pred['odds'].get('tansho', '-')
+                    odds_n = pred['odds'].get('nirentan', '-')
+                    ev_val = pred.get('ev', 0.0)
+
+                    msg = (f"🔥 **{place}{pred['rno']}R** {t_disp}\n"
+                           f"🛶 本命: {pred['best_boat']}号艇 (勝率:{pred['win_prob']:.0%})\n"
+                           f"🎯 推奨: {pred['combo']} (的中:{pred['prob']:.0%})\n"
+                           f"💰 オッズ: 単{odds_t} / 2単{odds_n}\n"
+                           f"📈 期待値: {ev_val:.2f} (1.0超で狙い目)\n"
+                           f"━━━━━━━━━━━━━━\n"
+                           f"🤖 **{pred['comment']}**\n"
+                           f"━━━━━━━━━━━━━━\n"
+                           f"📊 [オッズ確認]({odds_url})")
+                    send_discord(msg)
+                    print(f"✅ [Main] 通知送信: {place}{pred['rno']}R")
+                except Exception as e:
+                    print(f"🔥 [Main] Insert Error: {e}")
+
             conn.close()
 
         elapsed = time.time() - start_ts
