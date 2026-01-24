@@ -45,6 +45,7 @@ def get_deadline_time_accurately(soup, rno):
 def scrape_odds(session, jcd, rno, date_str, target_boat=None, target_combo=None):
     result = {"tansho": "---", "nirentan": "---"}
     try:
+        # 単勝
         if target_boat:
             url_tan = f"https://www.boatrace.jp/owpc/pc/race/oddstf?rno={rno}&jcd={jcd:02d}&hd={date_str}"
             soup_tan = get_soup(session, url_tan)
@@ -55,6 +56,7 @@ def scrape_odds(session, jcd, rno, date_str, target_boat=None, target_combo=None
                     odds_td = row.select_one("td.oddsPoint")
                     if odds_td: result["tansho"] = clean_text(odds_td.text)
 
+        # 2連単
         if target_combo:
             head, heel = target_combo.split('-')
             url_2t = f"https://www.boatrace.jp/owpc/pc/race/odds2tf?rno={rno}&jcd={jcd:02d}&hd={date_str}"
@@ -115,6 +117,9 @@ def scrape_race_data(session, jcd, rno, date_str):
     return row
 
 def scrape_result(session, jcd, rno, date_str):
+    """
+    レース結果（単勝・2連単・払戻金）を取得する
+    """
     url = f"https://www.boatrace.jp/owpc/pc/race/raceresult?rno={rno}&jcd={jcd:02d}&hd={date_str}"
     soup = get_soup(session, url)
     
@@ -134,22 +139,23 @@ def scrape_result(session, jcd, rno, date_str):
             
             header_text = clean_text(th_td.text)
             
-            # --- 単勝 ---
+            # --- 単勝 (ヘッダーが「単勝」の行) ---
             if "単勝" in header_text:
-                # 艇番: numberSet1_numberを持つspan
+                # 艇番: numberSet1_number クラスを持つ span
                 boat_span = row.select_one(".numberSet1_number")
                 if boat_span:
                     res["tansho_boat"] = clean_text(boat_span.text)
                 
-                # 払戻金
+                # 払戻金: is-payout1 クラスを持つ span
                 payout_span = row.select_one(".is-payout1")
                 if payout_span:
                     try:
                         res["tansho_payout"] = int(clean_text(payout_span.text).replace("¥", "").replace(",", ""))
                     except: pass
 
-            # --- 2連単 ---
+            # --- 2連単 (ヘッダーが「2連単」または「二連単」の行) ---
             elif "2連単" in header_text or "二連単" in header_text:
+                # 組番: 複数の numberSet1_number を取得
                 boat_spans = row.select(".numberSet1_number")
                 if len(boat_spans) >= 2:
                     res["nirentan_combo"] = f"{clean_text(boat_spans[0].text)}-{clean_text(boat_spans[1].text)}"
@@ -160,6 +166,7 @@ def scrape_result(session, jcd, rno, date_str):
                         res["nirentan_payout"] = int(clean_text(payout_span.text).replace("¥", "").replace(",", ""))
                     except: pass
 
+        # どちらか片方でも取れていれば結果ありとみなす
         if res["tansho_boat"] or res["nirentan_combo"]:
             return res
 
