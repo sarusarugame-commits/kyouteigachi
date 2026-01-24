@@ -90,15 +90,14 @@ def init_db():
         result_combo TEXT, is_win INTEGER, payout INTEGER, profit INTEGER, status TEXT
     )''')
     
-    # ★修正: 足りない列があれば追加する（マイグレーション）
+    # 列追加 (マイグレーション)
     required_cols = {
         'best_boat': 'TEXT',
         'odds_tansho': 'TEXT',
         'odds_nirentan': 'TEXT',
-        'result_tansho': 'TEXT' # 単勝結果用の列を追加
+        'result_tansho': 'TEXT'
     }
     
-    # 現在の列を取得
     try:
         c.execute("PRAGMA table_info(history)")
         existing_cols = {row['name'] for row in c.fetchall()}
@@ -139,6 +138,9 @@ def report_worker():
                     parts = race['race_id'].split('_')
                     date_str, jcd, rno = parts[0], int(parts[1]), int(parts[2])
                     
+                    # 日付整形 (YYYY/MM/DD)
+                    formatted_date = f"{date_str[:4]}/{date_str[4:6]}/{date_str[6:]}"
+                    
                     res = scrape_result(sess, jcd, rno, date_str)
                     
                     if res:
@@ -169,7 +171,7 @@ def report_worker():
 
                         if not actual_result: continue
 
-                        # ★修正: 単勝結果(result_tansho)もDBに記録
+                        # DB更新
                         c.execute("""
                             UPDATE history 
                             SET result_combo=?, is_win=?, payout=?, profit=?, status='FINISHED', result_tansho=?
@@ -184,7 +186,8 @@ def report_worker():
                         place = PLACE_NAMES.get(jcd, "会場")
                         type_lbl = "2単" if "-" in str(pred_combo) else "単勝"
                         
-                        msg = (f"{'🎊 的中' if is_win else '💀 外れ'} {place}{rno}R ({type_lbl})\n"
+                        # ★修正: 日付を追加
+                        msg = (f"{'🎊 的中' if is_win else '💀 外れ'} {formatted_date} {place}{rno}R ({type_lbl})\n"
                                f"予測:{pred_combo} → 結果:{actual_result} (単:{tansho_res})\n"
                                f"収支:{'+' if profit>0 else ''}{profit}円\n"
                                f"📉 本日累計: {'+' if daily_profit>0 else ''}{daily_profit}円")
@@ -204,8 +207,11 @@ def report_worker():
                 c.execute("SELECT count(*) FROM history WHERE status='PENDING'")
                 pending_cnt = c.fetchone()[0]
                 
+                # 日付整形
+                formatted_date_today = f"{today[:4]}/{today[4:6]}/{today[6:]}"
+                
                 status_emoji = "🟢" if pending_cnt > 0 else "💤"
-                msg = (f"**🛠️ {now.hour}時の定期報告**\n"
+                msg = (f"**🛠️ {now.hour}時の定期報告 ({formatted_date_today})**\n"
                        f"✅ 判明: {cnt or 0}R (的中: {wins or 0})\n"
                        f"⏳ 待ち: {pending_cnt or 0}R\n"
                        f"💵 本日収支: {'+' if (profit or 0)>0 else ''}{profit or 0}円")
@@ -267,6 +273,9 @@ def process_prediction(jcd, today, notified_ids, bst):
     c_temp.execute("SELECT sum(profit) FROM history WHERE date=? AND status='FINISHED'", (today,))
     current_daily_profit = c_temp.fetchone()[0] or 0
     conn_temp.close()
+    
+    # 日付整形用
+    formatted_date = f"{today[:4]}/{today[4:6]}/{today[6:]}"
     
     for rno in range(1, 13):
         rid = f"{today}_{str(jcd).zfill(2)}_{rno}"
@@ -339,7 +348,7 @@ def process_prediction(jcd, today, notified_ids, bst):
                 IGNORE_RACES.add(rid)
         except: continue
     
-    return pred_list, current_daily_profit
+    return pred_list, current_daily_profit, formatted_date
 
 def main():
     print(f"🚀 [Main] 完全統合Bot起動 (Model: {GROQ_MODEL_NAME})")
@@ -380,14 +389,16 @@ def main():
         
         new_preds = []
         current_daily_profit = 0
+        formatted_date = today
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=12) as executor:
             futures = [executor.submit(process_prediction, jcd, today, notified_ids, bst) for jcd in range(1, 25)]
             for f in concurrent.futures.as_completed(futures):
                 try: 
-                    res, profit = f.result()
+                    res, profit, date_fmt = f.result()
                     new_preds.extend(res)
                     current_daily_profit = profit
+                    formatted_date = date_fmt
                 except: pass
         
         if new_preds:
@@ -398,8 +409,6 @@ def main():
                     now_str = datetime.datetime.now(JST).strftime('%H:%M:%S')
                     place = PLACE_NAMES.get(pred['jcd'], "不明")
                     
-                    # ★修正: 追加した列 (best_boat, odds, result_tansho) に対応したINSERT
-                    # result_tanshoはまだないので空文字
                     c.execute("""
                         INSERT OR IGNORE INTO history 
                         (race_id, date, time, place, race_no, predict_combo, predict_prob, gemini_comment, 
@@ -418,7 +427,8 @@ def main():
                     
                     type_str = "2単" if "-" in str(pred['combo']) else "単勝"
 
-                    msg = (f"🔥 **{place}{pred['rno']}R** {t_disp}\n"
+                    # ★修正: 日付を追加
+                    msg = (f"🔥 **{formatted_date} {place}{pred['rno']}R** {t_disp}\n"
                            f"🛶 本命: {pred['best_boat']}号艇\n"
                            f"🎯 推奨: {pred['combo']} ({type_str}/率:{pred['prob']:.0%})\n"
                            f"💰 オッズ: 単{odds_t} / 2単{odds_n}\n"
