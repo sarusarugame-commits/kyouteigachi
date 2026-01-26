@@ -1,6 +1,8 @@
 pandas
+numpy
 lightgbm
+joblib
 requests
-google-generativeai
 beautifulsoup4
 lxml
+google-generativeai
