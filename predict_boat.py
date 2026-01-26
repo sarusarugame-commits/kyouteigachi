@@ -1,119 +1,114 @@
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
-import time
+import joblib
 import os
 
 # ==========================================
 # ⚙️ 設定エリア
 # ==========================================
-CSV_PATH = r"C:\Users\TAKUMA\競艇に勝つ\競艇データ\FINAL_FULL_DATA_2025_FIXED.csv"
+MODEL_FILE = 'ultimate_boat_model.pkl'
+STRATEGY_FILE = 'ultimate_winning_strategies.csv'
 
-def log(msg):
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+# 厳選フィルタ（上振れ排除設定）
+MIN_PROFIT = 1000  # 収支1000円以上のみ対象
+MIN_ROI = 110      # 回収率110%以上のみ対象
 
-# ==========================================
-# 1. 特徴量エンジニアリング（シナジー・モデル）
-# ==========================================
-def engineer_synergy_features(df):
-    log("🛠️ シナジー特徴量を生成中（勝率×スタートの相関など）...")
-    
-    # 選手の実力とスタートの掛け合わせ（最強の指標）
+# モデル特徴量（学習時と完全に一致させること）
+BASE_FEATURES = [
+    'wind',
+    'wr1', 'mo1', 'ex1', 'st1',
+    'wr2', 'mo2', 'ex2', 'st2',
+    'wr3', 'mo3', 'ex3', 'st3',
+    'wr4', 'mo4', 'ex4', 'st4',
+    'wr5', 'mo5', 'ex5', 'st5',
+    'wr6', 'mo6', 'ex6', 'st6'
+]
+
+def engineer_features(df):
+    """AIモデル用の特徴量（相対評価など）を作成"""
+    # 平均値
+    df['wr_mean'] = df[[f'wr{i}' for i in range(1, 7)]].mean(axis=1)
+    df['mo_mean'] = df[[f'mo{i}' for i in range(1, 7)]].mean(axis=1)
+    df['ex_mean'] = df[[f'ex{i}' for i in range(1, 7)]].mean(axis=1)
+    df['st_mean'] = df[[f'st{i}' for i in range(1, 7)]].mean(axis=1)
+
+    new_feats = []
     for i in range(1, 7):
-        # 勝率が高く、かつSTが早い（数値が小さい）ほど高い値になる指標
-        df[f'power_idx_{i}'] = df[f'wr{i}'] * (1.0 / (df[f'st{i}'] + 0.01))
+        df[f'wr{i}_rel'] = df[f'wr{i}'] - df['wr_mean']
+        df[f'mo{i}_rel'] = df[f'mo{i}'] - df['mo_mean']
+        df[f'ex{i}_rel'] = df['ex_mean'] - df[f'ex{i}'] # タイムは小さい方が良い
+        df[f'st{i}_rel'] = df['st_mean'] - df[f'st{i}'] # STも小さい方が良い
+        new_feats.extend([f'wr{i}_rel', f'mo{i}_rel', f'ex{i}_rel', f'st{i}_rel'])
+    
+    return df[BASE_FEATURES + new_feats]
+
+def predict_race(raw_data):
+    """
+    raw_data: scraper.scrape_race_dataで取得した辞書データ
+    戻り値: 推奨買い目のリスト（なければ空リスト）
+    """
+    if not os.path.exists(MODEL_FILE) or not os.path.exists(STRATEGY_FILE):
+        print("Error: Model or Strategy file not found.")
+        return []
+
+    try:
+        # データフレーム化 & 特徴量生成
+        df = pd.DataFrame([raw_data])
+        df = engineer_features(df)
         
-    # 1号艇と他艇の圧倒的格差
-    df['top_power_gap'] = df['power_idx_1'] / (df[[f'power_idx_{i}' for i in range(2, 7)]].max(axis=1) + 0.001)
-    
-    # 会場ごとの平均的な「荒れ度」
-    venue_hit_rate = df.groupby('jcd')['res1'].transform('mean')
-    df['venue_stability'] = venue_hit_rate
-
-    # 展示の相対評価（1号艇がどれだけ抜けているか）
-    ex_mean = df[[f'ex{i}' for i in range(1, 7)]].mean(axis=1)
-    df['ex_1_diff'] = ex_mean - df['ex1']
-
-    df['jcd'] = df['jcd'].astype('category')
-    return df
-
-# データ準備
-df = pd.read_csv(CSV_PATH).dropna(subset=['rank1', 'rank2', 'tansho', 'nirentan'])
-df = engineer_synergy_features(df)
-
-features = ['jcd', 'rno', 'wind', 'venue_stability', 'top_power_gap', 'ex_1_diff']
-for i in range(1, 7):
-    features.extend([f'wr{i}', f'st{i}', f'ex{i}', f'power_idx_{i}'])
-
-# 正解ラベル
-df['target_tan'] = df['rank1'].astype(int) - 1
-combinations = [f"{f}-{s}" for f in range(1, 7) for s in range(1, 7) if f != s]
-combo_to_id = {c: i for i, c in enumerate(combinations)}
-df['target_niren'] = (df['rank1'].astype(int).astype(str) + "-" + df['rank2'].astype(int).astype(str)).map(combo_to_id)
-df = df.dropna(subset=['target_niren'])
-
-# 分割
-split_idx = int(len(df) * 0.8)
-train_df, test_df = df.iloc[:split_idx], df.iloc[split_idx:]
-
-# ==========================================
-# 2. 超・深層学習（限界までパラメータを追い込む）
-# ==========================================
-def train_limit_model(y_col, num_class):
-    log(f"🧠 {y_col} の限界学習（最強パラメータ）を実行中...")
-    lgb_train = lgb.Dataset(train_df[features], label=train_df[y_col])
-    lgb_eval = lgb.Dataset(test_df[features], label=test_df[y_col], reference=lgb_train)
-    
-    params = {
-        'objective': 'multiclass',
-        'num_class': num_class,
-        'metric': 'multi_logloss',
-        'num_leaves': 511,         # 最大限の複雑さを許容
-        'learning_rate': 0.002,    # 極限まで慎重に学習
-        'feature_fraction': 0.6,
-        'bagging_fraction': 0.6,
-        'bagging_freq': 1,
-        'min_data_in_leaf': 10,
-        'lambda_l1': 1.0,          # 厳しいペナルティでノイズを排除
-        'lambda_l2': 1.0,
-        'verbose': -1,
-        'seed': 42
-    }
-    
-    return lgb.train(
-        params, lgb_train, 
-        num_boost_round=10000,     # 非常に長い学習
-        valid_sets=[lgb_train, lgb_eval],
-        callbacks=[lgb.early_stopping(stopping_rounds=300)]
-    )
-
-model_tan = train_limit_model('target_tan', 6)
-model_niren = train_limit_model('target_niren', 30)
-
-# ==========================================
-# 3. 究極の限界分析
-# ==========================================
-def analyze_ultimate(model, name, is_niren=False):
-    probs = model.predict(test_df[features])
-    preds = np.argmax(probs, axis=1)
-    confs = np.max(probs, axis=1)
-    y_test = test_df['target_niren' if is_niren else 'target_tan'].values
-    
-    print(f"\n👑 【{name}】 究極限界分析結果")
-    print("自信度 | 的中率 | レース数 | 回収率")
-    print("-----------------------------------------")
-    
-    # さらに高い自信度をチェック
-    thresholds = [0.85, 0.9, 0.92, 0.95] if not is_niren else [0.35, 0.4, 0.45, 0.5]
-    
-    for th in thresholds:
-        mask = confs >= th
-        if mask.sum() == 0: continue
+        # モデルロード
+        models = joblib.load(MODEL_FILE)
         
-        acc = (preds[mask] == y_test[mask]).mean() * 100
-        payouts = test_df.iloc[mask]['nirentan' if is_niren else 'tansho']
-        rec = (payouts[preds[mask] == y_test[mask]].sum() / (mask.sum() * 100)) * 100
-        print(f"{th*100:2.0f}%  | {acc:6.2f}% | {mask.sum():5d}R | {rec:6.2f}%")
+        # 予測 (各モデルで最も確率の高い艇を選ぶ)
+        p1 = np.argmax(models['r1'].predict(df), axis=1)[0]
+        p2 = np.argmax(models['r2'].predict(df), axis=1)[0]
+        p3 = np.argmax(models['r3'].predict(df), axis=1)[0]
+        
+        form_3t = f"{p1}-{p2}-{p3}"
+        form_2t = f"{p1}-{p2}"
+        best_boat = p1 # 本命艇
 
-analyze_ultimate(model_tan, "単勝")
-analyze_ultimate(model_niren, "二連単", True)
+        # 戦略リスト読み込み & フィルタリング
+        strategies = pd.read_csv(STRATEGY_FILE)
+        valid_strategies = strategies[
+            (strategies['回収率'] >= MIN_ROI) & 
+            (strategies['収支'] >= MIN_PROFIT)
+        ]
+        
+        valid_3t = set(valid_strategies[valid_strategies['券種']=='3連単']['買い目'])
+        valid_2t = set(valid_strategies[valid_strategies['券種']=='2連単']['買い目'])
+        
+        recommendations = []
+
+        # 3連単チェック
+        if form_3t in valid_3t:
+            if p1!=p2 and p1!=p3 and p2!=p3:
+                row = valid_strategies[(valid_strategies['券種']=='3連単') & (valid_strategies['買い目']==form_3t)].iloc[0]
+                recommendations.append({
+                    'type': '3連単',
+                    'combo': form_3t,
+                    'prob': row['的中率']/100, # csvの的中率は%表記なので
+                    'roi': row['回収率'],
+                    'profit': row['収支'],
+                    'best_boat': best_boat
+                })
+
+        # 2連単チェック
+        if form_2t in valid_2t:
+            if p1!=p2:
+                row = valid_strategies[(valid_strategies['券種']=='2連単') & (valid_strategies['買い目']==form_2t)].iloc[0]
+                recommendations.append({
+                    'type': '2連単',
+                    'combo': form_2t,
+                    'prob': row['的中率']/100,
+                    'roi': row['回収率'],
+                    'profit': row['収支'],
+                    'best_boat': best_boat
+                })
+                
+        return recommendations
+
+    except Exception as e:
+        print(f"Predict Error: {e}")
+        return []
