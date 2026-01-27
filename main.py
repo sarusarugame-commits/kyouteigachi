@@ -71,24 +71,31 @@ def process_race(jcd, rno, today):
         log(f"❌ {place}{rno}R: エラー {e}")
         return
 
-    # ★ここが重要：取得状況を必ずログに出す（沈黙させない）
+    # データチェック
     if not raw:
-        # log(f"💨 {place}{rno}R: データなし(開催外or未公開)")
+        # データがない場合も表示（開催なしか、まだ公開前）
+        # log(f"💨 {place}{rno}R: データなし")
         return
     
     if raw.get('wr1', 0) == 0:
         log(f"⚠️ {place}{rno}R: データ取得失敗 (勝率0.0) -> スキップ")
         return
     
-    # 正常に取れた場合のみ、ここを通る
-    # log(f"✅ {place}{rno}R: 取得成功 (1号艇勝率: {raw['wr1']})") 
+    # ★修正点：ここをコメントアウトせず表示します
+    log(f"✅ {place}{rno}R: データ取得成功 (1号艇勝率:{raw['wr1']} / モーター:{raw['mo1']})") 
 
     # 予測実行
     try:
         preds = predict_race(raw)
-    except: return
+    except Exception as e:
+        log(f"❌ {place}{rno}R: 予測エラー {e}")
+        return
 
-    if not preds: return
+    # ★修正点：予測結果がなかった場合も理由を表示
+    if not preds:
+        # ログが多すぎる場合はここをコメントアウトしてください
+        # log(f"💀 {place}{rno}R: 条件不一致（スルー）")
+        return
 
     conn = sqlite3.connect(DB_FILE)
     for p in preds:
@@ -103,7 +110,7 @@ def process_race(jcd, rno, today):
     conn.close()
 
 def main():
-    log("🚀 最強AI Bot (完全版) 起動")
+    log("🚀 最強AI Bot (全ログ出力・デバッグ版) 起動")
     init_db()
     threading.Thread(target=report_worker, daemon=True).start()
     
@@ -117,7 +124,6 @@ def main():
                 for rno in range(1, 13):
                     ex.submit(process_race, jcd, rno, today)
         
-        # ループ終了時にログを吐く
         log("💤 スキャン完了。5分待機...")
         time.sleep(300)
 
