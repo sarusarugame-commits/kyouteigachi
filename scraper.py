@@ -12,36 +12,31 @@ def clean_text(text):
     text = unicodedata.normalize('NFKC', str(text))
     return text.replace("\n", " ").replace("\r", "").strip()
 
-def extract_all_numbers(text):
-    if not text: return []
-    return re.findall(r"(\d+\.\d+|\d+)", text)
-
 def get_session():
-    # ★ここがキモ: Chrome 120 の指紋（TLS Fingerprint）を完全模倣
-    # これにより、サーバーは「ボットではなく人間（ブラウザ）が来た」と誤認します
-    session = requests.Session(impersonate="chrome120")
-    return session
+    # Chrome 120 の指紋を模倣（これで5KBブロックを突破）
+    return requests.Session(impersonate="chrome120")
 
 def get_soup(session, url):
     try:
-        # タイムアウトは短めに設定
-        res = session.get(url, timeout=10)
-        
-        # 万が一ブロック画面(5KB以下)ならログを出す
-        if len(res.content) < 6000:
-            print(f"⚠️ [Block check] Size:{len(res.content)} | URL:{url}", flush=True)
-        
-        return BeautifulSoup(res.content, 'lxml') if res.status_code == 200 else None
-    except Exception as e:
+        res = session.get(url, timeout=15)
+        if res.status_code != 200:
+            return None
+        return BeautifulSoup(res.content, 'lxml')
+    except:
         return None
 
+def extract_win_rate(text):
+    matches = re.findall(r"(\d\.\d{2})", text)
+    for m in matches:
+        val = float(m)
+        if 1.5 <= val <= 9.99: return val
+    return 0.0
+
 def scrape_race_data(session, jcd, rno, date_str):
-    """高速並列処理に耐えうるスクレイピング"""
     base_url = "https://www.boatrace.jp/owpc/pc/race"
     url_before = f"{base_url}/beforeinfo?rno={rno}&jcd={jcd:02d}&hd={date_str}"
     url_list = f"{base_url}/racelist?rno={rno}&jcd={jcd:02d}&hd={date_str}"
 
-    # 並列アクセス
     soup_before = get_soup(session, url_before)
     soup_list = get_soup(session, url_list)
     
@@ -51,58 +46,51 @@ def scrape_race_data(session, jcd, rno, date_str):
     row = {'date': date_str, 'jcd': jcd, 'rno': rno}
     row['deadline_time'] = "23:59"
 
-    # --- 締切時刻 ---
+    # 締切時刻
     try:
-        target_cell = soup_list.find(lambda tag: tag.name in ['th', 'td'] and "締切予定時刻" in tag.text)
-        if target_cell:
-            cells = target_cell.find_parent("tr").find_all(['th', 'td'])
+        target = soup_list.find(lambda t: t.name in ['th','td'] and "締切予定時刻" in t.text)
+        if target:
+            cells = target.find_parent("tr").find_all(['th','td'])
             if len(cells) > rno:
-                time_txt = clean_text(cells[rno].text)
-                match = re.search(r"(\d{1,2}:\d{2})", time_txt)
-                if match: row['deadline_time'] = match.group(1)
+                m = re.search(r"(\d{1,2}:\d{2})", clean_text(cells[rno].text))
+                if m: row['deadline_time'] = m.group(1)
     except: pass
 
-    # --- 風速 ---
+    # 風速
     try:
         w_node = soup_before.select_one(".weather1_bodyUnitLabelData")
-        match = re.search(r"(\d+)m", clean_text(w_node.text)) if w_node else None
-        row['wind'] = float(match.group(1)) if match else 0.0
+        m = re.search(r"(\d+)m", clean_text(w_node.text)) if w_node else None
+        row['wind'] = float(m.group(1)) if m else 0.0
     except: row['wind'] = 0.0
 
-    # --- 各艇データ ---
+    # 各艇データ
     for i in range(1, 7):
-        # 展示タイム
         try:
-            node = soup_before.select_one(f"td.is-boatColor{i}")
-            tr = node.find_parent("tr")
-            ex_txt = clean_text(tr.select("td")[4].text)
-            row[f'ex{i}'] = float(re.search(r"(\d\.\d{2})", ex_txt).group(1))
+            # 展示タイム
+            node_b = soup_before.select_one(f"td.is-boatColor{i}")
+            tr_b = node_b.find_parent("tr")
+            ex_val = clean_text(tr_b.select("td")[4].text)
+            row[f'ex{i}'] = float(re.search(r"(\d\.\d{2})", ex_val).group(1))
         except: row[f'ex{i}'] = 6.80
 
-        # 勝率・ST・モーター
         try:
-            node = soup_list.select_one(f"td.is-boatColor{i}")
-            tbody = node.find_parent("tbody")
-            full_text = clean_text(tbody.text)
-
-            # 勝率 (1.50 ~ 9.99)
-            wr_matches = re.findall(r"(\d\.\d{2})", full_text)
-            valid_wr = [float(x) for x in wr_matches if 1.5 <= float(x) <= 9.99]
-            row[f'wr{i}'] = valid_wr[0] if valid_wr else 0.0
-
-            # ST
-            st_match = re.search(r"ST(\.\d{2}|\d\.\d{2})", full_text.replace(" ", ""))
-            if st_match:
-                val = st_match.group(1)
+            # 勝率・ST・モーター
+            node_l = soup_list.select_one(f"td.is-boatColor{i}")
+            tbody = node_l.find_parent("tbody")
+            full_txt = clean_text(tbody.text)
+            
+            row[f'wr{i}'] = extract_win_rate(full_txt)
+            
+            m_st = re.search(r"ST(\.\d{2}|\d\.\d{2})", full_txt.replace(" ", ""))
+            if m_st:
+                val = m_st.group(1)
                 row[f'st{i}'] = float(val) if val.startswith("0") or val.startswith(".") else 0.20
             else: row[f'st{i}'] = 0.20
-            if row[f'st{i}'] < 0: row[f'st{i}'] = 0.20
+            if row[f'st{i}'] < 0: row[f'st{i}'] = 0.20 # フライング補正
 
-            # モーター (10.0以上)
-            mo_matches = re.findall(r"(\d{2}\.\d)", full_text)
-            valid_mo = [float(x) for x in mo_matches if float(x) > 10.0]
+            m_mo = re.findall(r"(\d{2}\.\d)", full_txt)
+            valid_mo = [float(x) for x in m_mo if float(x) > 10.0]
             row[f'mo{i}'] = valid_mo[0] if valid_mo else 30.0
-
         except:
             row[f'wr{i}'], row[f'st{i}'], row[f'mo{i}'] = 0.0, 0.20, 30.0
 
