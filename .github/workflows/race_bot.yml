@@ -2,11 +2,14 @@ name: Boat Race Bot
 
 on:
   schedule:
-    # JST 08:30 (UTC 23:30)
+    # ⏰ すべて日本時間（JST）で計算
+    # 1. 朝〜昼（JST 08:30開始）
     - cron: '30 23 * * *'
-    # JST 14:30 (UTC 05:30)
+    # 2. 昼〜夕（JST 14:30開始）
     - cron: '30 5 * * *'
-  workflow_dispatch:
+    # 3. 夕〜夜（JST 20:30開始 - ナイター最終までカバー）
+    - cron: '30 11 * * *'
+  workflow_dispatch: # 手動実行も可能
 
 permissions:
   contents: write
@@ -14,7 +17,7 @@ permissions:
 jobs:
   run-race-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 360 # 最大6時間の実行を許可
 
     steps:
       - name: Checkout
@@ -24,33 +27,37 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-          cache: 'pip'
+          cache: 'pip' # インストールを高速化
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # requirements.txt があればそれを使う
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-          # なければ直接インストール
+          # 必須ライブラリを確実にインストール
           pip install pandas numpy lightgbm joblib requests beautifulsoup4 lxml
 
       - name: Run Bot
         env:
+          # Discord通知用のURL（Secretsに登録している前提）
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: |
           python main.py
 
       - name: Force Save Database
+        # 成功・失敗に関わらず、実行後のDB状態を常にGitHubへ保存
         if: always()
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "bot@noreply.github.com"
+          
+          # コンフリクトを避けるために最新状態を取得してからDBを上書きコミット
           git fetch origin main
-          git reset origin/main
+          git reset --soft origin/main
           git add race_data.db
+          
           if git diff --staged --quiet; then
-            echo "No changes"
+            echo "No changes to commit."
           else
-            git commit -m "Update DB [skip ci]"
+            git commit -m "Update race database with daily results [skip ci]"
             git push origin main
           fi
