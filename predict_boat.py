@@ -5,7 +5,7 @@ import joblib
 import os
 import re
 import traceback
-from groq import Groq  # ★元通り公式ライブラリを使用
+from groq import Groq
 
 MODEL_FILE = 'ultimate_boat_model.pkl'
 STRATEGY_FILE = 'ultimate_winning_strategies.csv'
@@ -17,14 +17,13 @@ MIN_PROFIT = 1000
 MIN_ROI = 110       
 
 # Groq設定
-# ★重要: base_urlは指定しない（ライブラリのデフォルトに任せる）
-# ★モデル名を確実に存在する標準モデルに変更
+# ★モデルを元の「meta-llama/llama-4-scout-17b-16e-instruct」に戻しました
 GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
 client = None
 if os.environ.get("GROQ_API_KEY"):
     try:
-        # ★ここが修正点: base_url を削除
+        # ★ base_url は削除（これが通信エラーの原因でした）
         client = Groq(
             api_key=os.environ.get("GROQ_API_KEY")
         )
