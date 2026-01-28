@@ -24,36 +24,24 @@ def log(msg):
 
 def send_discord(content):
     url = os.environ.get("DISCORD_WEBHOOK_URL")
-    if not url:
-        log("❌ Discord Error: 環境変数 DISCORD_WEBHOOK_URL が設定されていません！")
-        return
-
-    # URLチェック
-    if not url.startswith("http"):
-        log(f"❌ Discord Error: URLの形式がおかしいです -> {url[:10]}...")
-        return
+    if not url: return
 
     try:
-        # 送信実行
         resp = std_requests.post(url, json={"content": content}, timeout=10)
-        
         if 200 <= resp.status_code < 300:
             log(f"✅ Discord送信成功: {resp.status_code}")
         else:
             log(f"💀 Discord送信失敗: Code {resp.status_code}")
-            log(f"   Response: {resp.text}")
-            
     except Exception as e:
         log(f"💀 Discord接続エラー: {e}")
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
-    # ★重要: デバッグ用に毎回テーブルを削除して作り直す
-    # これにより「過去に通知済み」という判定がなくなり、必ず通知が飛ぶ
-    conn.execute("DROP TABLE IF EXISTS history")
+    # ★デバッグ用: 毎回リセットして、修正後の通知をテストする
+    conn.execute("DROP TABLE IF EXISTS history") 
     conn.execute("CREATE TABLE IF NOT EXISTS history (race_id TEXT PRIMARY KEY, date TEXT, place TEXT, race_no INTEGER, predict_combo TEXT, status TEXT, profit INTEGER)")
     conn.close()
-    log("🧹 DB初期化完了（履歴をリセットしました）")
+    log("🧹 DB初期化完了（履歴リセット済み）")
 
 def report_worker(stop_event):
     while not stop_event.is_set():
@@ -75,7 +63,6 @@ def report_worker(stop_event):
                 combo = p['predict_combo']
                 result_str = "未確定"
                 
-                # 3連単 or 2連単 判定
                 if str(combo).count("-") == 2:
                     if res.get('sanrentan_combo'):
                         result_str = res['sanrentan_combo']
@@ -114,36 +101,24 @@ def process_race(jcd, rno, today):
     try:
         raw, error = scrape_race_data(sess, jcd, rno, today)
     except Exception as e:
-        log(f"❌ {place}{rno}R: エラー {e}")
         return
 
     if error: return
     if not raw or raw.get('wr1', 0) == 0: return
 
-    # ログ出力
     log(f"✅ {place}{rno}R 取得完了 ------------------------------")
-    # データの中身が見たい場合は以下のコメントアウトを外す
-    # headers = ['date', 'jcd', 'rno', 'wind', 'wr1', 'mo1', 'ex1', 'st1']
-    # values = [str(raw.get(k, '')) for k in headers]
-    # log(f"   DATA HEAD: {','.join(values)}...") 
     log("----------------------------------------------------------")
 
     try: preds = predict_race(raw)
-    except Exception as e:
-        log(f"❌ 予測エラー {place}{rno}R: {e}")
-        return
-        
+    except: return
     if not preds: return
 
     conn = sqlite3.connect(DB_FILE)
     for p in preds:
         combo = p['combo']
         race_id = f"{today}_{jcd}_{rno}_{combo}"
-        
-        # DBに存在するかチェック
         exists = conn.execute("SELECT 1 FROM history WHERE race_id=?", (race_id,)).fetchone()
         
-        # なければ新規登録＆通知
         if not exists:
             ptype = p.get('type', '不明')
             profit = p.get('profit', 0)
@@ -163,23 +138,15 @@ def process_race(jcd, rno, today):
                 f"🔗 [オッズ確認・投票]({odds_url})"
             )
             
-            # DBに書き込む
             conn.execute("INSERT INTO history VALUES (?,?,?,?,?,?,?)", (race_id, today, place, rno, combo, 'PENDING', 0))
             conn.commit()
-            
-            # ★ここで通知を飛ばす！
             send_discord(msg)
             
     conn.close()
 
 def main():
     log("🚀 最強AI Bot (DBリセット＆強制通知モード) 起動")
-    
-    # 起動直後の接続テスト
-    log("🧪 起動時 Discord接続テスト...")
-    send_discord("🚀 Botが再起動しました！DBをリセットして通知テストを開始します。")
-
-    init_db() # ここでDB履歴を全消去
+    init_db()
     
     stop_event = threading.Event()
     t = threading.Thread(target=report_worker, args=(stop_event,), daemon=True)
@@ -190,13 +157,9 @@ def main():
 
     while True:
         now = datetime.datetime.now(JST)
-        
         if now.hour == 23 and now.minute >= 55:
-            log(f"🌙 {now.strftime('%H:%M')} ミッドナイト終了。")
             break
-        
         if time.time() - start_time > MAX_RUNTIME:
-            log("🔄 稼働時間上限。")
             break
 
         today = now.strftime('%Y%m%d')
