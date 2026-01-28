@@ -19,7 +19,7 @@ MIN_ROI = 110
 # Groq設定
 # ★重要: base_urlは指定しない（ライブラリのデフォルトに任せる）
 # ★モデル名を確実に存在する標準モデルに変更
-GROQ_MODEL = "llama3-70b-8192" 
+GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
 client = None
 if os.environ.get("GROQ_API_KEY"):
