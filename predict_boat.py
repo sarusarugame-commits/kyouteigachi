@@ -26,21 +26,11 @@ if os.environ.get("GROQ_API_KEY"):
 def ask_groq_reason(row, combo, ptype):
     if not client: return "AI解説: (APIキー設定確認中)"
     try:
-        # 安全に値を取得するヘルパー関数
-        def safe_get(key):
-            val = row.get(key, 0)
-            # 文字列化して数値抽出を試みる簡易ロジック
-            try:
-                s = str(val).replace('[','').replace(']','').replace("'",'')
-                return float(s)
-            except:
-                return 0
-            
         data_str = (
-            f"1号艇:勝率{safe_get('wr1')}\n"
-            f"2号艇:勝率{safe_get('wr2')}\n"
-            f"3号艇:勝率{safe_get('wr3')}\n"
-            f"4号艇:勝率{safe_get('wr4')}\n"
+            f"1号艇:勝率{row.get('wr1',0)}\n"
+            f"2号艇:勝率{row.get('wr2',0)}\n"
+            f"3号艇:勝率{row.get('wr3',0)}\n"
+            f"4号艇:勝率{row.get('wr4',0)}\n"
         )
         prompt = f"買い目「{combo}」({ptype})を推奨する理由を、競艇のプロとして100文字以内で断言せよ。\nデータ:\n{data_str}"
         
@@ -57,45 +47,34 @@ def ask_groq_reason(row, combo, ptype):
     except Exception as e:
         return f"AI解説エラー: {str(e)}"
 
-def engineer_features(df):
-    # 基本特徴量
-    base_cols = [
-        'wind',
-        'wr1', 'mo1', 'ex1', 'st1', 'wr2', 'mo2', 'ex2', 'st2',
-        'wr3', 'mo3', 'ex3', 'st3', 'wr4', 'mo4', 'ex4', 'st4',
-        'wr5', 'mo5', 'ex5', 'st5', 'wr6', 'mo6', 'ex6', 'st6'
-    ]
-    
-    # ★修正ポイント: 文字列経由で強制クリーニング
-    # どんな型(list, array)で来ても、一旦文字列にして [] を消し去る
-    for col in base_cols:
-        if col in df.columns:
-            # 1. 文字列型に変換
-            df[col] = df[col].astype(str)
-            # 2. 不要な文字（リストのカッコなど）を削除
-            df[col] = df[col].str.replace(r'[\[\]\']', '', regex=True)
-            # 3. 数値に変換（失敗したら0.0）
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
-        else:
-            df[col] = 0.0
-
-    # 追加特徴量
-    df['wr_mean'] = df[[f'wr{i}' for i in range(1, 7)]].mean(axis=1)
-    df['mo_mean'] = df[[f'mo{i}' for i in range(1, 7)]].mean(axis=1)
-    df['ex_mean'] = df[[f'ex{i}' for i in range(1, 7)]].mean(axis=1)
-    df['st_mean'] = df[[f'st{i}' for i in range(1, 7)]].mean(axis=1)
-
-    for i in range(1, 7):
-        df[f'wr{i}_rel'] = df[f'wr{i}'] - df['wr_mean']
-        df[f'mo{i}_rel'] = df[f'mo{i}'] - df['mo_mean']
-        df[f'ex{i}_rel'] = df['ex_mean'] - df[f'ex{i}'] 
-        df[f'st{i}_rel'] = df['st_mean'] - df[f'st{i}'] 
-    
-    return df
+# ★最強のクリーニング関数（辞書の値そのものを直す）
+def unwrap_value(v):
+    # リストや配列なら中身を取り出す（再帰）
+    if isinstance(v, (list, tuple, np.ndarray)):
+        if len(v) == 0: return 0.0
+        return unwrap_value(v[0])
+    # 文字列なら数値化
+    if isinstance(v, str):
+        try:
+            return float(v.replace(',', '').replace('[','').replace(']','').strip())
+        except:
+            return 0.0
+    return v
 
 def predict_race(raw_data):
     recommendations = []
     
+    # ---------------------------------------------------------
+    # 0. 前処理: 辞書の中身をここで全部フラットな数値にする
+    # ---------------------------------------------------------
+    clean_data = {}
+    for k, v in raw_data.items():
+        try:
+            val = unwrap_value(v)
+            clean_data[k] = float(val) # 強制的にfloat
+        except:
+            clean_data[k] = 0.0
+            
     # ---------------------------------------------------------
     # 1. AI予測
     # ---------------------------------------------------------
@@ -111,9 +90,20 @@ def predict_race(raw_data):
             print("⚠️ Model Error: 'features' key missing.")
             return []
 
-        # データ作成
-        df = pd.DataFrame([raw_data])
-        df = engineer_features(df) # ★文字列経由クリーニング実行
+        # クリーンなデータからDataFrame作成
+        df = pd.DataFrame([clean_data])
+        
+        # 特徴量エンジニアリング（単純計算のみ）
+        df['wr_mean'] = df[[f'wr{i}' for i in range(1, 7)]].mean(axis=1)
+        df['mo_mean'] = df[[f'mo{i}' for i in range(1, 7)]].mean(axis=1)
+        df['ex_mean'] = df[[f'ex{i}' for i in range(1, 7)]].mean(axis=1)
+        df['st_mean'] = df[[f'st{i}' for i in range(1, 7)]].mean(axis=1)
+
+        for i in range(1, 7):
+            df[f'wr{i}_rel'] = df[f'wr{i}'] - df['wr_mean']
+            df[f'mo{i}_rel'] = df[f'mo{i}'] - df['mo_mean']
+            df[f'ex{i}_rel'] = df['ex_mean'] - df[f'ex{i}'] 
+            df[f'st{i}_rel'] = df['st_mean'] - df[f'st{i}'] 
         
         # 列の整合性確保
         df_final = pd.DataFrame()
@@ -159,7 +149,7 @@ def predict_race(raw_data):
 
     # ★ 3連単 (強制通知)
     if p1 != p2 and p1 != p3 and p2 != p3:
-        reason = ask_groq_reason(raw_data, form_3t, "3連単")
+        reason = ask_groq_reason(clean_data, form_3t, "3連単")
         recommendations.append({
             'type': '3連単',
             'combo': form_3t,
@@ -171,7 +161,7 @@ def predict_race(raw_data):
 
     # ★ 2連単 (強制通知)
     if p1 != p2:
-        reason = ask_groq_reason(raw_data, form_2t, "2連単")
+        reason = ask_groq_reason(clean_data, form_2t, "2連単")
         recommendations.append({
             'type': '2連単',
             'combo': form_2t,
