@@ -3,9 +3,8 @@ import numpy as np
 import lightgbm as lgb
 import joblib
 import os
-import re
-import traceback
 from groq import Groq
+import traceback
 
 MODEL_FILE = 'ultimate_boat_model.pkl'
 STRATEGY_FILE = 'ultimate_winning_strategies.csv'
@@ -29,7 +28,13 @@ def ask_groq_reason(row, combo, ptype):
     if not client: return "AI解説: (APIキー設定確認中)"
     try:
         def safe_get(key):
-            return row.get(key, 0)
+            try:
+                val = row.get(key, 0)
+                if isinstance(val, (list, np.ndarray)):
+                    return val[0] if len(val) > 0 else 0
+                return val
+            except:
+                return 0
             
         data_str = (
             f"1号艇:勝率{safe_get('wr1')}\n"
@@ -52,51 +57,36 @@ def ask_groq_reason(row, combo, ptype):
     except Exception as e:
         return f"AI解説エラー: {str(e)}"
 
-# ★デバッグ用：値を厳密にチェックして変換する
-def debug_convert(key, val):
+# 再帰的クリーニング
+def unwrap_value(v):
+    if isinstance(v, (list, tuple, np.ndarray)):
+        if len(v) == 0: return 0.0
+        return unwrap_value(v[0])
+    if isinstance(v, str):
+        try:
+            return float(v.replace(',', '').replace('[','').replace(']','').strip())
+        except:
+            return 0.0
     try:
-        # まずは単純な変換を試みる
-        if isinstance(val, (int, float)):
-            return float(val)
-        
-        # 文字列の場合
-        s_val = str(val)
-        
-        # 正規表現で数値抽出
-        match = re.search(r"(-?\d+\.?\d*)", s_val)
-        if match:
-            return float(match.group(1))
-            
-        return 0.0
-    except Exception as e:
-        # ★ここで犯人をログに出す
-        print(f"🔥 CONVERT ERROR on Key: [{key}]")
-        print(f"   Value: {val}")
-        print(f"   Type: {type(val)}")
-        print(f"   Error: {e}")
-        # traceback.print_exc() 
-        # エラーを握りつぶさず、0.0を返して次に進める（ログ取り優先）
+        return float(v)
+    except:
         return 0.0
 
 def predict_race(raw_data):
     recommendations = []
     
-    print(f"🔍 Debug: Processing Race Data...", flush=True)
-
     # ---------------------------------------------------------
-    # 0. 前処理: 1つずつ値をチェックして変換 (犯人探し)
+    # 0. 前処理: 辞書 -> フラットな辞書 (全float)
     # ---------------------------------------------------------
     clean_data = {}
     for k, v in raw_data.items():
-        # ここで全項目をチェックしながら変換
-        clean_data[k] = debug_convert(k, v)
+        clean_data[k] = unwrap_value(v)
             
     # ---------------------------------------------------------
     # 1. AI予測
     # ---------------------------------------------------------
     try:
         if not os.path.exists(MODEL_FILE):
-            print("⚠️ Model file not found.")
             return []
 
         models = joblib.load(MODEL_FILE)
@@ -107,38 +97,29 @@ def predict_race(raw_data):
             print("⚠️ Model Error: 'features' key missing.")
             return []
 
-        # ここまで来れば clean_data は全て float になっているはず
-        # 確認のため型チェックログを出す（最初だけ）
-        # print(f"🔍 Clean Data Sample: {list(clean_data.items())[:5]}", flush=True)
-
+        # DataFrame作成
         df = pd.DataFrame([clean_data])
         
         # 特徴量エンジニアリング
-        # 念の為、計算前に存在確認
+        # カラムが存在しない場合は0埋めしてから計算
         for i in range(1, 7):
             if f'wr{i}' not in df.columns: df[f'wr{i}'] = 0.0
             if f'mo{i}' not in df.columns: df[f'mo{i}'] = 0.0
             if f'ex{i}' not in df.columns: df[f'ex{i}'] = 0.0
             if f'st{i}' not in df.columns: df[f'st{i}'] = 0.0
 
-        # 計算処理（ここでエラーが出るならPandasの問題）
-        try:
-            df['wr_mean'] = df[[f'wr{i}' for i in range(1, 7)]].mean(axis=1)
-            df['mo_mean'] = df[[f'mo{i}' for i in range(1, 7)]].mean(axis=1)
-            df['ex_mean'] = df[[f'ex{i}' for i in range(1, 7)]].mean(axis=1)
-            df['st_mean'] = df[[f'st{i}' for i in range(1, 7)]].mean(axis=1)
+        df['wr_mean'] = df[[f'wr{i}' for i in range(1, 7)]].mean(axis=1)
+        df['mo_mean'] = df[[f'mo{i}' for i in range(1, 7)]].mean(axis=1)
+        df['ex_mean'] = df[[f'ex{i}' for i in range(1, 7)]].mean(axis=1)
+        df['st_mean'] = df[[f'st{i}' for i in range(1, 7)]].mean(axis=1)
 
-            for i in range(1, 7):
-                df[f'wr{i}_rel'] = df[f'wr{i}'] - df['wr_mean']
-                df[f'mo{i}_rel'] = df[f'mo{i}'] - df['mo_mean']
-                df[f'ex{i}_rel'] = df['ex_mean'] - df[f'ex{i}'] 
-                df[f'st{i}_rel'] = df['st_mean'] - df[f'st{i}'] 
-        except Exception as e:
-            print(f"🔥 Feature Engineering Error: {e}", flush=True)
-            print(df.dtypes) # 型情報を出す
-            return []
-
-        # モデル入力整形
+        for i in range(1, 7):
+            df[f'wr{i}_rel'] = df[f'wr{i}'] - df['wr_mean']
+            df[f'mo{i}_rel'] = df[f'mo{i}'] - df['mo_mean']
+            df[f'ex{i}_rel'] = df['ex_mean'] - df[f'ex{i}'] 
+            df[f'st{i}_rel'] = df['st_mean'] - df[f'st{i}'] 
+        
+        # モデルが要求する列だけに絞る（並び順も強制）
         df_final = pd.DataFrame()
         for f in required_feats:
             if f in df.columns:
@@ -146,15 +127,55 @@ def predict_race(raw_data):
             else:
                 df_final[f] = 0.0
         
-        # NumPy配列化
+        # ★★★ ここが修正の肝 ★★★
+        # DataFrameをそのまま渡さず、NumPy配列(float32)に変換してから渡す
+        # これで "array cannot be converted to scalar" エラーを回避
         X = df_final.values.astype(np.float32)
         
-        # 予測
+        # 予測実行
         try:
-            p1_idx = np.argmax(models['r1'].predict_proba(X), axis=1)[0]
-            p2_idx = np.argmax(models['r2'].predict_proba(X), axis=1)[0]
-            p3_idx = np.argmax(models['r3'].predict_proba(X), axis=1)[0]
-        except:
+            # 内部ヘルパー関数: 安全に予測結果を取得する
+            def safe_predict_idx(model, input_x):
+                # 1. predict_proba が使えるか試す
+                try:
+                    proba = model.predict_proba(input_x)
+                    return np.argmax(proba, axis=1)[0]
+                except:
+                    pass
+                
+                # 2. predict を使う
+                pred = model.predict(input_x)
+                
+                # pred が2次元配列かつ列数が複数ある場合は確率とみなす
+                if hasattr(pred, 'ndim') and pred.ndim == 2 and pred.shape[1] > 1:
+                    return np.argmax(pred, axis=1)[0]
+                
+                # スカラーまたは1次元配列の場合
+                val = pred[0]
+                
+                # 値が配列の場合の処理 (これがエラーの主原因)
+                if hasattr(val, 'ndim') and val.ndim > 0:
+                    if val.size == 1:
+                        val = val.item()
+                    else:
+                        # 配列サイズが > 1 なら argmax を試みる
+                        try:
+                            return np.argmax(val)
+                        except:
+                            val = val[0] # フォールバック
+                elif isinstance(val, (list, tuple)) and len(val) > 1:
+                     # リストなら argmax 的な処理... はできないので先頭
+                     val = val[0]
+                
+                return int(val) - 1
+
+            p1_idx = safe_predict_idx(models['r1'], X)
+            p2_idx = safe_predict_idx(models['r2'], X)
+            p3_idx = safe_predict_idx(models['r3'], X)
+
+        except Exception as inner_e:
+            # 従来のエラーハンドリング（念のため残すが safe_predict_idx でほぼカバー）
+            print(f"⚠️ Internal Predict Error: {inner_e}")
             p1_idx = int(models['r1'].predict(X)[0]) - 1
             p2_idx = int(models['r2'].predict(X)[0]) - 1
             p3_idx = int(models['r3'].predict(X)[0]) - 1
@@ -162,9 +183,10 @@ def predict_race(raw_data):
         p1, p2, p3 = p1_idx + 1, p2_idx + 1, p3_idx + 1
         
     except Exception as e:
-        # ここで本当の死因が出る
-        print(f"💀 FATAL AI ERROR: {e}", flush=True)
-        traceback.print_exc()
+        # 詳細なエラー情報を出す
+        import traceback
+        print(f"⚠️ AI Prediction Error: {e}", flush=True)
+        # traceback.print_exc() # 必要ならコメントアウト解除
         return [] 
 
     # ---------------------------------------------------------
@@ -185,7 +207,7 @@ def predict_race(raw_data):
                 roi = match.iloc[0]['回収率']
     except: pass 
 
-    # ★ 3連単
+    # ★ 3連単 (強制通知)
     if p1 != p2 and p1 != p3 and p2 != p3:
         reason = ask_groq_reason(clean_data, form_3t, "3連単")
         recommendations.append({
@@ -197,7 +219,7 @@ def predict_race(raw_data):
             'reason': reason
         })
 
-    # ★ 2連単
+    # ★ 2連単 (強制通知)
     if p1 != p2:
         reason = ask_groq_reason(clean_data, form_2t, "2連単")
         recommendations.append({
