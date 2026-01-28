@@ -24,14 +24,36 @@ def log(msg):
 
 def send_discord(content):
     url = os.environ.get("DISCORD_WEBHOOK_URL")
-    if url: 
-        try: std_requests.post(url, json={"content": content}, timeout=10)
-        except: pass
+    if not url:
+        log("❌ Discord Error: 環境変数 DISCORD_WEBHOOK_URL が設定されていません！")
+        return
+
+    # URLチェック
+    if not url.startswith("http"):
+        log(f"❌ Discord Error: URLの形式がおかしいです -> {url[:10]}...")
+        return
+
+    try:
+        # 送信実行
+        resp = std_requests.post(url, json={"content": content}, timeout=10)
+        
+        if 200 <= resp.status_code < 300:
+            log(f"✅ Discord送信成功: {resp.status_code}")
+        else:
+            log(f"💀 Discord送信失敗: Code {resp.status_code}")
+            log(f"   Response: {resp.text}")
+            
+    except Exception as e:
+        log(f"💀 Discord接続エラー: {e}")
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
+    # ★重要: デバッグ用に毎回テーブルを削除して作り直す
+    # これにより「過去に通知済み」という判定がなくなり、必ず通知が飛ぶ
+    conn.execute("DROP TABLE IF EXISTS history")
     conn.execute("CREATE TABLE IF NOT EXISTS history (race_id TEXT PRIMARY KEY, date TEXT, place TEXT, race_no INTEGER, predict_combo TEXT, status TEXT, profit INTEGER)")
     conn.close()
+    log("🧹 DB初期化完了（履歴をリセットしました）")
 
 def report_worker(stop_event):
     while not stop_event.is_set():
@@ -59,7 +81,7 @@ def report_worker(stop_event):
                         result_str = res['sanrentan_combo']
                         if res['sanrentan_combo'] == combo:
                             hit = True
-                            payout = res.get('sanrentan_payout', 0) * 10 # 100円単位*10=1000円
+                            payout = res.get('sanrentan_payout', 0) * 10
                 else:
                     if res.get('nirentan_combo'):
                         result_str = res['nirentan_combo']
@@ -73,8 +95,9 @@ def report_worker(stop_event):
                     conn.commit()
                     
                     if hit:
-                        send_discord(f"🎯 **{p['place']}{p['race_no']}R** 的中！！\n買い目: **{combo}**\n払戻: {int(payout):,}円\n収支: +{profit:,}円")
+                        msg = f"🎯 **{p['place']}{p['race_no']}R** 的中！！\n買い目: **{combo}**\n払戻: {int(payout):,}円\n収支: +{profit:,}円"
                         log(f"🎯 {p['place']}{p['race_no']}R 的中！ {combo} (+{profit}円)")
+                        send_discord(msg)
                     else:
                         log(f"💀 {p['place']}{p['race_no']}R ハズレ... 予想:{combo} 結果:{result_str}")
             conn.close()
@@ -97,33 +120,30 @@ def process_race(jcd, rno, today):
     if error: return
     if not raw or raw.get('wr1', 0) == 0: return
 
-    # ★復活：全データをCSV形式でログに出す（ここが消えていました）★
+    # ログ出力
     log(f"✅ {place}{rno}R 取得完了 ------------------------------")
-    headers = [
-        'date', 'jcd', 'rno', 'wind', 'res1', 'rank1', 'rank2', 'rank3',
-        'tansho', 'nirentan', 'sanrentan', 'sanrenpuku', 'payout',
-        'wr1', 'mo1', 'ex1', 'f1', 'st1',
-        'wr2', 'mo2', 'ex2', 'f2', 'st2',
-        'wr3', 'mo3', 'ex3', 'f3', 'st3',
-        'wr4', 'mo4', 'ex4', 'f4', 'st4',
-        'wr5', 'mo5', 'ex5', 'f5', 'st5',
-        'wr6', 'mo6', 'ex6', 'f6', 'st6'
-    ]
-    # 値を文字列化してカンマ結合
-    values = [str(raw.get(k, '')) for k in headers]
-    log(f"   DATA: {','.join(values)}")
+    # データの中身が見たい場合は以下のコメントアウトを外す
+    # headers = ['date', 'jcd', 'rno', 'wind', 'wr1', 'mo1', 'ex1', 'st1']
+    # values = [str(raw.get(k, '')) for k in headers]
+    # log(f"   DATA HEAD: {','.join(values)}...") 
     log("----------------------------------------------------------")
 
     try: preds = predict_race(raw)
-    except: return
+    except Exception as e:
+        log(f"❌ 予測エラー {place}{rno}R: {e}")
+        return
+        
     if not preds: return
 
     conn = sqlite3.connect(DB_FILE)
     for p in preds:
         combo = p['combo']
         race_id = f"{today}_{jcd}_{rno}_{combo}"
+        
+        # DBに存在するかチェック
         exists = conn.execute("SELECT 1 FROM history WHERE race_id=?", (race_id,)).fetchone()
         
+        # なければ新規登録＆通知
         if not exists:
             ptype = p.get('type', '不明')
             profit = p.get('profit', 0)
@@ -143,31 +163,40 @@ def process_race(jcd, rno, today):
                 f"🔗 [オッズ確認・投票]({odds_url})"
             )
             
+            # DBに書き込む
             conn.execute("INSERT INTO history VALUES (?,?,?,?,?,?,?)", (race_id, today, place, rno, combo, 'PENDING', 0))
             conn.commit()
+            
+            # ★ここで通知を飛ばす！
             send_discord(msg)
+            
     conn.close()
 
 def main():
-    log("🚀 最強AI Bot (全データログ＆ミッドナイト完全統合版) 起動")
-    init_db()
+    log("🚀 最強AI Bot (DBリセット＆強制通知モード) 起動")
+    
+    # 起動直後の接続テスト
+    log("🧪 起動時 Discord接続テスト...")
+    send_discord("🚀 Botが再起動しました！DBをリセットして通知テストを開始します。")
+
+    init_db() # ここでDB履歴を全消去
+    
     stop_event = threading.Event()
     t = threading.Thread(target=report_worker, args=(stop_event,), daemon=True)
     t.start()
     
     start_time = time.time()
-    MAX_RUNTIME = 5.8 * 3600 # エラー回避のため5.8時間で再起動
+    MAX_RUNTIME = 5.8 * 3600
 
     while True:
         now = datetime.datetime.now(JST)
         
-        # 23:55終了設定（ミッドナイト対応）
         if now.hour == 23 and now.minute >= 55:
-            log(f"🌙 {now.strftime('%H:%M')} ミッドナイト終了。本日の営業を終了します。")
+            log(f"🌙 {now.strftime('%H:%M')} ミッドナイト終了。")
             break
         
         if time.time() - start_time > MAX_RUNTIME:
-            log("🔄 稼働時間上限。次のスケジュールへバトンタッチします。")
+            log("🔄 稼働時間上限。")
             break
 
         today = now.strftime('%Y%m%d')
