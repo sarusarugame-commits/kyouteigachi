@@ -29,9 +29,12 @@ def ask_groq_reason(row, combo, ptype):
         # 安全に値を取得するヘルパー関数
         def safe_get(key):
             val = row.get(key, 0)
-            if isinstance(val, (list, np.ndarray)):
-                return val[0] if len(val) > 0 else 0
-            return val
+            # 文字列化して数値抽出を試みる簡易ロジック
+            try:
+                s = str(val).replace('[','').replace(']','').replace("'",'')
+                return float(s)
+            except:
+                return 0
             
         data_str = (
             f"1号艇:勝率{safe_get('wr1')}\n"
@@ -54,26 +57,6 @@ def ask_groq_reason(row, combo, ptype):
     except Exception as e:
         return f"AI解説エラー: {str(e)}"
 
-def clean_value(x):
-    """
-    どんなデータが来ても強制的にfloatにする最強のクリーニング関数
-    """
-    try:
-        # リストや配列なら中身を取り出す（再帰的）
-        if isinstance(x, (list, tuple, np.ndarray)):
-            if len(x) == 0: return 0.0
-            return clean_value(x[0])
-        
-        # 文字列なら数値変換
-        if isinstance(x, str):
-            # カンマ削除など
-            x = x.replace(',', '').strip()
-            return float(x)
-            
-        return float(x)
-    except:
-        return 0.0
-
 def engineer_features(df):
     # 基本特徴量
     base_cols = [
@@ -83,9 +66,18 @@ def engineer_features(df):
         'wr5', 'mo5', 'ex5', 'st5', 'wr6', 'mo6', 'ex6', 'st6'
     ]
     
-    # ★修正ポイント: 全セルに対して clean_value を適用
+    # ★修正ポイント: 文字列経由で強制クリーニング
+    # どんな型(list, array)で来ても、一旦文字列にして [] を消し去る
     for col in base_cols:
-        df[col] = df[col].apply(clean_value)
+        if col in df.columns:
+            # 1. 文字列型に変換
+            df[col] = df[col].astype(str)
+            # 2. 不要な文字（リストのカッコなど）を削除
+            df[col] = df[col].str.replace(r'[\[\]\']', '', regex=True)
+            # 3. 数値に変換（失敗したら0.0）
+            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+        else:
+            df[col] = 0.0
 
     # 追加特徴量
     df['wr_mean'] = df[[f'wr{i}' for i in range(1, 7)]].mean(axis=1)
@@ -121,7 +113,7 @@ def predict_race(raw_data):
 
         # データ作成
         df = pd.DataFrame([raw_data])
-        df = engineer_features(df) # ★ここで完全に数値化される
+        df = engineer_features(df) # ★文字列経由クリーニング実行
         
         # 列の整合性確保
         df_final = pd.DataFrame()
