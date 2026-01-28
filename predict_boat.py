@@ -3,8 +3,8 @@ import numpy as np
 import lightgbm as lgb
 import joblib
 import os
-from groq import Groq
 import traceback
+from groq import Groq
 
 MODEL_FILE = 'ultimate_boat_model.pkl'
 STRATEGY_FILE = 'ultimate_winning_strategies.csv'
@@ -57,7 +57,7 @@ def ask_groq_reason(row, combo, ptype):
     except Exception as e:
         return f"AI解説エラー: {str(e)}"
 
-# 再帰的クリーニング
+# 再帰的クリーニング (入力データ用)
 def unwrap_value(v):
     if isinstance(v, (list, tuple, np.ndarray)):
         if len(v) == 0: return 0.0
@@ -101,7 +101,6 @@ def predict_race(raw_data):
         df = pd.DataFrame([clean_data])
         
         # 特徴量エンジニアリング
-        # カラムが存在しない場合は0埋めしてから計算
         for i in range(1, 7):
             if f'wr{i}' not in df.columns: df[f'wr{i}'] = 0.0
             if f'mo{i}' not in df.columns: df[f'mo{i}'] = 0.0
@@ -119,7 +118,7 @@ def predict_race(raw_data):
             df[f'ex{i}_rel'] = df['ex_mean'] - df[f'ex{i}'] 
             df[f'st{i}_rel'] = df['st_mean'] - df[f'st{i}'] 
         
-        # モデルが要求する列だけに絞る（並び順も強制）
+        # モデル入力整形
         df_final = pd.DataFrame()
         for f in required_feats:
             if f in df.columns:
@@ -127,16 +126,14 @@ def predict_race(raw_data):
             else:
                 df_final[f] = 0.0
         
-        # ★★★ ここが修正の肝 ★★★
-        # DataFrameをそのまま渡さず、NumPy配列(float32)に変換してから渡す
-        # これで "array cannot be converted to scalar" エラーを回避
+        # NumPy配列(float32)に変換
         X = df_final.values.astype(np.float32)
         
-        # 予測実行
+        # 予測実行 (安全化ロジック適用)
         try:
             # 内部ヘルパー関数: 安全に予測結果を取得する
             def safe_predict_idx(model, input_x):
-                # 1. predict_proba が使えるか試す
+                # 1. predict_proba が使えるか試す (分類モデルの場合)
                 try:
                     proba = model.predict_proba(input_x)
                     return np.argmax(proba, axis=1)[0]
@@ -158,13 +155,11 @@ def predict_race(raw_data):
                     if val.size == 1:
                         val = val.item()
                     else:
-                        # 配列サイズが > 1 なら argmax を試みる
                         try:
                             return np.argmax(val)
                         except:
-                            val = val[0] # フォールバック
+                            val = val[0]
                 elif isinstance(val, (list, tuple)) and len(val) > 1:
-                     # リストなら argmax 的な処理... はできないので先頭
                      val = val[0]
                 
                 return int(val) - 1
@@ -174,19 +169,17 @@ def predict_race(raw_data):
             p3_idx = safe_predict_idx(models['r3'], X)
 
         except Exception as inner_e:
-            # 従来のエラーハンドリング（念のため残すが safe_predict_idx でほぼカバー）
             print(f"⚠️ Internal Predict Error: {inner_e}")
-            p1_idx = int(models['r1'].predict(X)[0]) - 1
-            p2_idx = int(models['r2'].predict(X)[0]) - 1
-            p3_idx = int(models['r3'].predict(X)[0]) - 1
+            # 万が一の最終バックアップ
+            p1_idx = int(models['r1'].predict(X).flat[0]) - 1
+            p2_idx = int(models['r2'].predict(X).flat[0]) - 1
+            p3_idx = int(models['r3'].predict(X).flat[0]) - 1
 
         p1, p2, p3 = p1_idx + 1, p2_idx + 1, p3_idx + 1
         
     except Exception as e:
-        # 詳細なエラー情報を出す
-        import traceback
         print(f"⚠️ AI Prediction Error: {e}", flush=True)
-        # traceback.print_exc() # 必要ならコメントアウト解除
+        # traceback.print_exc()
         return [] 
 
     # ---------------------------------------------------------
@@ -207,7 +200,7 @@ def predict_race(raw_data):
                 roi = match.iloc[0]['回収率']
     except: pass 
 
-    # ★ 3連単 (強制通知)
+    # ★ 3連単
     if p1 != p2 and p1 != p3 and p2 != p3:
         reason = ask_groq_reason(clean_data, form_3t, "3連単")
         recommendations.append({
@@ -219,7 +212,7 @@ def predict_race(raw_data):
             'reason': reason
         })
 
-    # ★ 2連単 (強制通知)
+    # ★ 2連単
     if p1 != p2:
         reason = ask_groq_reason(clean_data, form_2t, "2連単")
         recommendations.append({
