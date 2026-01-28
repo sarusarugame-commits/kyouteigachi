@@ -3,10 +3,10 @@ import numpy as np
 import lightgbm as lgb
 import joblib
 import os
-import re
+import requests # ★公式ライブラリ廃止、requestsを使用
 import time
+import json
 import traceback
-from groq import Groq
 
 MODEL_FILE = 'ultimate_boat_model.pkl'
 STRATEGY_FILE = 'ultimate_winning_strategies.csv'
@@ -18,25 +18,17 @@ MIN_PROFIT = 1000
 MIN_ROI = 110       
 
 # Groq設定
-# ★指定されたモデルに固定
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+# ★モデル名は元のまま
 GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
-client = None
-if os.environ.get("GROQ_API_KEY"):
-    try:
-        # ★ base_url は削除（接続エラーの真因）
-        client = Groq(
-            api_key=os.environ.get("GROQ_API_KEY")
-        )
-    except Exception as e:
-        print(f"❌ Groq Client Init Error: {e}")
-
 def ask_groq_reason(row, combo, ptype):
-    print(f"🤖 Groq API呼び出し: {combo}...", flush=True)
+    api_key = os.environ.get("GROQ_API_KEY")
+    print(f"🤖 Groq API呼び出し(requests): {combo}...", flush=True)
     
-    if not client: 
-        print("❌ Groq Error: クライアントが初期化されていません", flush=True)
-        return "AI解説: (接続エラー)"
+    if not api_key: 
+        print("❌ Groq Error: APIキーなし", flush=True)
+        return "AI解説: (APIキー設定なし)"
     
     def safe_get(key):
         try:
@@ -55,23 +47,38 @@ def ask_groq_reason(row, combo, ptype):
     )
     prompt = f"買い目「{combo}」({ptype})を推奨する理由を、競艇のプロとして100文字以内で断言せよ。\nデータ:\n{data_str}"
     
-    # リトライ処理 (接続エラー対策)
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [
+            {"role": "system", "content": "You are a professional boat race analyst. Answer in Japanese."},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.7,
+        "max_tokens": 150
+    }
+
+    # リトライ処理
     for attempt in range(3):
         try:
-            completion = client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=[
-                    {"role": "system", "content": "You are a professional boat race analyst. Answer in Japanese."},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=0.7,
-                max_tokens=150,
-            )
-            content = completion.choices[0].message.content
-            print(f"🤖 Groq応答成功", flush=True)
-            return content
+            # ★requestsで直接POST送信 (ライブラリ依存なし)
+            response = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=10)
+            
+            if response.status_code == 200:
+                data = response.json()
+                content = data['choices'][0]['message']['content']
+                print(f"🤖 Groq応答成功", flush=True)
+                return content
+            else:
+                print(f"⚠️ Groq API Error {response.status_code}: {response.text}", flush=True)
+                time.sleep(2)
+                
         except Exception as e:
-            print(f"⚠️ Groq API Error (Attempt {attempt+1}): {e}", flush=True)
+            print(f"⚠️ Groq Connection Error (Attempt {attempt+1}): {e}", flush=True)
             time.sleep(2)
 
     return "AI解説: (通信エラー)"
