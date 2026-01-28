@@ -8,7 +8,7 @@ from groq import Groq
 MODEL_FILE = 'ultimate_boat_model.pkl'
 STRATEGY_FILE = 'ultimate_winning_strategies.csv'
 
-# ★強制通知設定（動作確認用）
+# ★強制通知設定
 MIN_PROFIT = -999999 
 MIN_ROI = 0       
 
@@ -26,18 +26,18 @@ if os.environ.get("GROQ_API_KEY"):
 def ask_groq_reason(row, combo, ptype):
     if not client: return "AI解説: (APIキー設定確認中)"
     try:
-        # 値を取り出す際にも安全策を講じる
-        def get_val(key):
-            v = row.get(key, 0)
-            if isinstance(v, list) or isinstance(v, np.ndarray):
-                return v[0] if len(v) > 0 else 0
-            return v
+        # 安全に値を取得するヘルパー関数
+        def safe_get(key):
+            val = row.get(key, 0)
+            if isinstance(val, (list, np.ndarray)):
+                return val[0] if len(val) > 0 else 0
+            return val
             
         data_str = (
-            f"1号艇:勝率{get_val('wr1')}\n"
-            f"2号艇:勝率{get_val('wr2')}\n"
-            f"3号艇:勝率{get_val('wr3')}\n"
-            f"4号艇:勝率{get_val('wr4')}\n"
+            f"1号艇:勝率{safe_get('wr1')}\n"
+            f"2号艇:勝率{safe_get('wr2')}\n"
+            f"3号艇:勝率{safe_get('wr3')}\n"
+            f"4号艇:勝率{safe_get('wr4')}\n"
         )
         prompt = f"買い目「{combo}」({ptype})を推奨する理由を、競艇のプロとして100文字以内で断言せよ。\nデータ:\n{data_str}"
         
@@ -54,6 +54,26 @@ def ask_groq_reason(row, combo, ptype):
     except Exception as e:
         return f"AI解説エラー: {str(e)}"
 
+def clean_value(x):
+    """
+    どんなデータが来ても強制的にfloatにする最強のクリーニング関数
+    """
+    try:
+        # リストや配列なら中身を取り出す（再帰的）
+        if isinstance(x, (list, tuple, np.ndarray)):
+            if len(x) == 0: return 0.0
+            return clean_value(x[0])
+        
+        # 文字列なら数値変換
+        if isinstance(x, str):
+            # カンマ削除など
+            x = x.replace(',', '').strip()
+            return float(x)
+            
+        return float(x)
+    except:
+        return 0.0
+
 def engineer_features(df):
     # 基本特徴量
     base_cols = [
@@ -63,12 +83,9 @@ def engineer_features(df):
         'wr5', 'mo5', 'ex5', 'st5', 'wr6', 'mo6', 'ex6', 'st6'
     ]
     
-    # ★修正ポイント: リストや配列の中身を強制的に取り出す
+    # ★修正ポイント: 全セルに対して clean_value を適用
     for col in base_cols:
-        # まずリストかどうかチェックして、リストなら先頭要素を取り出す関数を適用
-        df[col] = df[col].apply(lambda x: x[0] if isinstance(x, (list, np.ndarray)) and len(x) > 0 else x)
-        # その後、数値変換
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
+        df[col] = df[col].apply(clean_value)
 
     # 追加特徴量
     df['wr_mean'] = df[[f'wr{i}' for i in range(1, 7)]].mean(axis=1)
@@ -99,12 +116,12 @@ def predict_race(raw_data):
         if 'features' in models:
             required_feats = models['features']
         else:
-            print("⚠️ Model Error: 'features' key missing in pickle.")
+            print("⚠️ Model Error: 'features' key missing.")
             return []
 
         # データ作成
         df = pd.DataFrame([raw_data])
-        df = engineer_features(df) # ここで型変換される
+        df = engineer_features(df) # ★ここで完全に数値化される
         
         # 列の整合性確保
         df_final = pd.DataFrame()
@@ -128,7 +145,7 @@ def predict_race(raw_data):
         
     except Exception as e:
         print(f"⚠️ AI Prediction Error: {e}", flush=True)
-        return [] # エラー時は通知しない
+        return [] 
 
     # ---------------------------------------------------------
     # 2. 買い目作成 (AI成功時のみ)
