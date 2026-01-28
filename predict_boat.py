@@ -5,7 +5,7 @@ import joblib
 import os
 import re
 import traceback
-from openai import OpenAI # ★変更: OpenAIライブラリを使用
+from groq import Groq  # ★元通り公式ライブラリを使用
 
 MODEL_FILE = 'ultimate_boat_model.pkl'
 STRATEGY_FILE = 'ultimate_winning_strategies.csv'
@@ -13,26 +13,30 @@ STRATEGY_FILE = 'ultimate_winning_strategies.csv'
 # ==========================================
 # ⚙️ 本番運用設定
 # ==========================================
-MIN_PROFIT = 1000   # 期待値1000円以上のみ通知
-MIN_ROI = 110       # 回収率110%以上のみ通知
+MIN_PROFIT = 1000   
+MIN_ROI = 110       
 
-# Groq設定 (OpenAI互換エンドポイント)
-GROQ_BASE_URL = "https://api.groq.com/openai/v1"
-GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
+# Groq設定
+# ★重要: base_urlは指定しない（ライブラリのデフォルトに任せる）
+# ★モデル名を確実に存在する標準モデルに変更
+GROQ_MODEL = "llama3-70b-8192" 
 
 client = None
 if os.environ.get("GROQ_API_KEY"):
-    client = OpenAI(
-        api_key=os.environ.get("GROQ_API_KEY"),
-        base_url=GROQ_BASE_URL # ★重要: ここでGroqに向ける
-    )
+    try:
+        # ★ここが修正点: base_url を削除
+        client = Groq(
+            api_key=os.environ.get("GROQ_API_KEY")
+        )
+    except Exception as e:
+        print(f"❌ Groq Client Init Error: {e}")
 
 def ask_groq_reason(row, combo, ptype):
-    print(f"🤖 Groq API呼び出し(OpenAI Client): {combo} ({ptype})...", flush=True)
+    print(f"🤖 Groq API呼び出し: {combo}...", flush=True)
     
     if not client: 
-        print("❌ Groq Error: APIキーが設定されていません", flush=True)
-        return "AI解説: (APIキー設定なし)"
+        print("❌ Groq Error: クライアントが初期化されていません", flush=True)
+        return "AI解説: (接続エラー)"
     
     try:
         def safe_get(key):
@@ -52,7 +56,6 @@ def ask_groq_reason(row, combo, ptype):
         )
         prompt = f"買い目「{combo}」({ptype})を推奨する理由を、競艇のプロとして100文字以内で断言せよ。\nデータ:\n{data_str}"
         
-        # OpenAIライブラリの書き方はGroqと同じ
         completion = client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[
@@ -63,7 +66,7 @@ def ask_groq_reason(row, combo, ptype):
             max_tokens=150,
         )
         content = completion.choices[0].message.content
-        print(f"🤖 Groq応答成功: {content[:20]}...", flush=True)
+        print(f"🤖 Groq応答成功", flush=True)
         return content
 
     except Exception as e:
@@ -88,16 +91,10 @@ def unwrap_value(v):
 def predict_race(raw_data):
     recommendations = []
     
-    # ---------------------------------------------------------
-    # 0. 前処理
-    # ---------------------------------------------------------
     clean_data = {}
     for k, v in raw_data.items():
         clean_data[k] = unwrap_value(v)
             
-    # ---------------------------------------------------------
-    # 1. AI予測
-    # ---------------------------------------------------------
     try:
         if not os.path.exists(MODEL_FILE):
             return []
@@ -154,13 +151,10 @@ def predict_race(raw_data):
                     if val.size == 1:
                         val = val.item()
                     else:
-                        try:
-                            return np.argmax(val)
-                        except:
-                            val = val[0]
+                        try: return np.argmax(val)
+                        except: val = val[0]
                 elif isinstance(val, (list, tuple)) and len(val) > 1:
                      val = val[0]
-                
                 return int(val) - 1
 
             p1_idx = safe_predict_idx(models['r1'], X)
@@ -177,9 +171,6 @@ def predict_race(raw_data):
         print(f"⚠️ AI Prediction Error: {e}", flush=True)
         return [] 
 
-    # ---------------------------------------------------------
-    # 2. 買い目作成とフィルタリング
-    # ---------------------------------------------------------
     form_3t = f"{p1}-{p2}-{p3}"
     form_2t = f"{p1}-{p2}"
     
@@ -189,7 +180,7 @@ def predict_race(raw_data):
             strategies = pd.read_csv(STRATEGY_FILE)
     except: pass
 
-    # ★ 3連単チェック
+    # ★ 3連単
     if p1 != p2 and p1 != p3 and p2 != p3:
         profit, prob, roi = 0, 0, 0
         valid = False
@@ -203,11 +194,9 @@ def predict_race(raw_data):
                 
                 if profit >= MIN_PROFIT and roi >= MIN_ROI:
                     valid = True
-                    print(f"✅ 採用: 3連単 {form_3t} (期待値:{profit}円/ROI:{roi}%)", flush=True)
+                    print(f"✅ 採用: 3連単 {form_3t} (期待値:{profit}円)", flush=True)
                 else:
-                    print(f"🛑 却下: 3連単 {form_3t} (期待値:{profit}円/ROI:{roi}%) - 基準不足", flush=True)
-            else:
-                print(f"⚠️ データなし: 3連単 {form_3t}", flush=True)
+                    print(f"🛑 却下: 3連単 {form_3t} (期待値:{profit}円)", flush=True)
         
         if valid:
             reason = ask_groq_reason(clean_data, form_3t, "3連単")
@@ -220,7 +209,7 @@ def predict_race(raw_data):
                 'reason': reason
             })
 
-    # ★ 2連単チェック
+    # ★ 2連単
     if p1 != p2:
         profit, prob, roi = 0, 0, 0
         valid = False
@@ -234,11 +223,9 @@ def predict_race(raw_data):
                 
                 if profit >= MIN_PROFIT and roi >= MIN_ROI:
                     valid = True
-                    print(f"✅ 採用: 2連単 {form_2t} (期待値:{profit}円/ROI:{roi}%)", flush=True)
+                    print(f"✅ 採用: 2連単 {form_2t} (期待値:{profit}円)", flush=True)
                 else:
-                    print(f"🛑 却下: 2連単 {form_2t} (期待値:{profit}円/ROI:{roi}%) - 基準不足", flush=True)
-            else:
-                print(f"⚠️ データなし: 2連単 {form_2t}", flush=True)
+                    print(f"🛑 却下: 2連単 {form_2t} (期待値:{profit}円)", flush=True)
         
         if valid:
             reason = ask_groq_reason(clean_data, form_2t, "2連単")
