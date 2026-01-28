@@ -12,8 +12,8 @@ MODEL_FILE = 'ultimate_boat_model.pkl'
 STRATEGY_FILE = 'ultimate_winning_strategies.csv'
 
 # 厳選フィルタ
-MIN_PROFIT = 1000   
-MIN_ROI = 110       
+MIN_PROFIT = 0      # 利益0円以上ならOK
+MIN_ROI = 100       # 回収率100%以上ならOK      
 
 # モデル特徴量
 BASE_FEATURES = [
