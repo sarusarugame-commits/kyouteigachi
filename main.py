@@ -7,6 +7,7 @@ import threading
 import sys
 import requests as std_requests
 import json
+import pandas as pd
 
 # 自作モジュール
 from scraper import scrape_race_data, get_session
@@ -95,7 +96,21 @@ def process_race(jcd, rno, today):
     if error: return
     if not raw or raw.get('wr1', 0) == 0: return
 
-    log(f"✅ {place}{rno}R 取得完了 [風:{raw['wind']}m] 1号艇(勝率:{raw['wr1']})")
+    # ★ここを修正：全データをCSV形式でログに出す★
+    log(f"✅ {place}{rno}R 取得完了 ------------------------------")
+    headers = [
+        'date', 'jcd', 'rno', 'wind', 'res1', 'rank1', 'rank2', 'rank3',
+        'tansho', 'nirentan', 'sanrentan', 'sanrenpuku', 'payout',
+        'wr1', 'mo1', 'ex1', 'f1', 'st1',
+        'wr2', 'mo2', 'ex2', 'f2', 'st2',
+        'wr3', 'mo3', 'ex3', 'f3', 'st3',
+        'wr4', 'mo4', 'ex4', 'f4', 'st4',
+        'wr5', 'mo5', 'ex5', 'f5', 'st5',
+        'wr6', 'mo6', 'ex6', 'f6', 'st6'
+    ]
+    values = [str(raw.get(k, '')) for k in headers]
+    log(f"   DATA: {','.join(values)}")
+    log("----------------------------------------------------------")
 
     try: preds = predict_race(raw)
     except: return
@@ -132,27 +147,25 @@ def process_race(jcd, rno, today):
     conn.close()
 
 def main():
-    log("🚀 最強AI Bot (ミッドナイト対応版) 起動")
+    log("🚀 最強AI Bot (全データ証明＆ミッドナイト版) 起動")
     init_db()
     stop_event = threading.Event()
     t = threading.Thread(target=report_worker, args=(stop_event,), daemon=True)
     t.start()
     
     start_time = time.time()
-    MAX_RUNTIME = 5.8 * 3600 # 5.8時間 (エラー回避のため6時間ギリギリ手前で停止)
+    MAX_RUNTIME = 5.8 * 3600
 
     while True:
         now = datetime.datetime.now(JST)
         
-        # ★修正: 23:55までは稼働する（ミッドナイト最終Rの結果反映のため）
+        # 23:55終了設定
         if now.hour == 23 and now.minute >= 55:
-            log(f"🌙 {now.strftime('%H:%M')} ミッドナイト開催も終了しました。本日の営業を終了します。")
+            log(f"🌙 {now.strftime('%H:%M')} ミッドナイト終了。本日の営業を終了します。")
             break
         
-        # 稼働時間制限チェック
-        elapsed = time.time() - start_time
-        if elapsed > MAX_RUNTIME:
-            log("🔄 稼働時間上限に達しました。次のスケジュールへバトンタッチします。")
+        if elapsed := time.time() - start_time > MAX_RUNTIME:
+            log("🔄 稼働時間上限。次のスケジュールへバトンタッチします。")
             break
 
         today = now.strftime('%Y%m%d')
